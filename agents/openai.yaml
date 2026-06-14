@@ -1,0 +1,7 @@
+interface:
+  display_name: "Workspaces"
+  short_description: "Track local dev workspaces and specs"
+  default_prompt: "Use $workspaces to create, adopt, inspect, or update a local development workspace."
+
+policy:
+  allow_implicit_invocation: true

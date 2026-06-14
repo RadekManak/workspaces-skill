@@ -1,0 +1,9 @@
+# Runtime configuration for the workspaces skill.
+source_root: ~/git
+workspace_root: ~/workspaces
+ledger_root: ~/workspaces/_ledger
+base_remote: origin
+base_branch: main
+push_remote: fork
+jira_base_url: ""
+github_host: github.com
