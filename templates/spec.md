@@ -2,28 +2,28 @@
 
 ## Input
 
-Source material, Jira text, user request, and links.
+{input}
 
 ## Goal
 
-What should be true when this is done.
+TBD.
 
 ## Non-Goals
 
-What we are explicitly not doing.
+TBD.
 
 ## Current Understanding
 
-Relevant context discovered so far.
+TBD.
 
 ## Plan
 
-Implementation approach.
+TBD.
 
 ## Validation
 
-How to check the work.
+TBD.
 
 ## Open Questions
 
-Things that need human answer before or during implementation.
+TBD.

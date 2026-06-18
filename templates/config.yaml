@@ -7,3 +7,4 @@ base_branch: main
 push_remote: fork
 jira_base_url: ""
 github_host: github.com
+editor_command: code
