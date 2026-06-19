@@ -1,0 +1,93 @@
+import datetime as dt
+import os
+import re
+import subprocess
+from pathlib import Path
+
+import yaml
+
+
+SKILL_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = Path("~/workspaces/config.yaml").expanduser()
+
+DEFAULT_CONFIG = {
+    "source_root": "~/git",
+    "workspace_root": "~/workspaces",
+    "ledger_root": "~/workspaces/_ledger",
+    "base_remote": "origin",
+    "base_branch": "main",
+    "push_remote": "fork",
+    "jira_base_url": "",
+    "github_host": "github.com",
+    "editor_command": "code",
+}
+
+DONE_STATES = {"closed", "dev-complete"}
+STATE_ORDER = {
+    "review-feedback": 0,
+    "blocked": 1,
+    "needs-clarification": 2,
+    "user-review": 3,
+    "in-progress": 4,
+    "pr-review": 5,
+    "scoped": 6,
+    "captured": 7,
+    "dev-complete": 8,
+    "closed": 9,
+}
+
+
+def now():
+    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def expand(value):
+    if isinstance(value, str):
+        return os.path.expandvars(os.path.expanduser(value))
+    return value
+
+
+def write_yaml(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=False)
+
+
+def read_yaml(path):
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def slug(value):
+    text = str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9._-]+", "-", text)
+    text = text.strip("-")
+    return text or "issue"
+
+
+def run(cmd, cwd=None, check=True, capture=True):
+    proc = subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    if check and proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise SystemExit(f"Command failed: {' '.join(cmd)}\n{stderr}")
+    return (proc.stdout or "").strip()
+
+
+def relative_or_absolute(path, base):
+    path = Path(path).expanduser()
+    base = Path(base).expanduser()
+    try:
+        return os.path.relpath(path.resolve(), base.resolve())
+    except FileNotFoundError:
+        return os.path.relpath(path.absolute(), base.absolute())
+
+
+def template(name):
+    return (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")

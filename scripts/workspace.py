@@ -9,7 +9,38 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+
+from workspaces import issues as issue_model
+from workspaces.cleanup import CleanupSafety
+from workspaces.common import (
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_PATH,
+    DONE_STATES,
+    STATE_ORDER,
+    expand,
+    now,
+    read_yaml,
+    run,
+    slug,
+    template,
+)
+from workspaces.git import (
+    branch_exists,
+    branch_merged,
+    github_repo_from_remote,
+    git_info,
+    git_root,
+    is_linked_worktree,
+    path_is_under,
+    worktree_dirty,
+)
+from workspaces.issues import (
+    ISSUE_ACTIVE_STATUSES,
+    ISSUE_DONE_STATUSES,
+    ISSUE_STATUS_ORDER,
+    ISSUE_TYPES,
+)
+from workspaces.ledger import WorkspaceLedger
 
 try:
     import yaml
@@ -19,60 +50,7 @@ except ImportError:
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = Path("~/workspaces/config.yaml").expanduser()
 CONFIG_PATH = Path(os.environ.get("WORKSPACES_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
-
-DEFAULT_CONFIG = {
-    "source_root": "~/git",
-    "workspace_root": "~/workspaces",
-    "ledger_root": "~/workspaces/_ledger",
-    "base_remote": "origin",
-    "base_branch": "main",
-    "push_remote": "fork",
-    "jira_base_url": "",
-    "github_host": "github.com",
-    "editor_command": "code",
-}
-
-DONE_STATES = {"closed", "dev-complete"}
-STATE_ORDER = {
-    "review-feedback": 0,
-    "blocked": 1,
-    "needs-clarification": 2,
-    "user-review": 3,
-    "in-progress": 4,
-    "pr-review": 5,
-    "scoped": 6,
-    "captured": 7,
-    "dev-complete": 8,
-    "closed": 9,
-}
-
-ISSUE_TYPES = {"AFK", "HITL"}
-ISSUE_DONE_STATUSES = {"merged", "done", "skipped"}
-ISSUE_ACTIVE_STATUSES = {"planned", "ready", "needs-fix"}
-ISSUE_STATUS_ORDER = {
-    "blocked-hitl": 0,
-    "failed": 1,
-    "needs-fix": 2,
-    "reviewing": 3,
-    "running": 4,
-    "ready": 5,
-    "planned": 6,
-    "merged": 7,
-    "done": 8,
-    "skipped": 9,
-}
-
-
-def now():
-    return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
-
-
-def expand(value):
-    if isinstance(value, str):
-        return os.path.expandvars(os.path.expanduser(value))
-    return value
 
 
 def load_config():
@@ -84,40 +62,6 @@ def load_config():
     for key in ("source_root", "workspace_root", "ledger_root"):
         config[key] = expand(config[key])
     return config
-
-
-def write_yaml(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False, allow_unicode=False)
-
-
-def read_yaml(path):
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def slug(value):
-    text = str(value).strip().lower()
-    text = re.sub(r"[^a-z0-9._-]+", "-", text)
-    text = text.strip("-")
-    return text or "issue"
-
-
-def run(cmd, cwd=None, check=True, capture=True):
-    proc = subprocess.run(
-        cmd,
-        cwd=cwd,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
-    if check and proc.returncode != 0:
-        stderr = (proc.stderr or "").strip()
-        raise SystemExit(f"Command failed: {' '.join(cmd)}\n{stderr}")
-    return (proc.stdout or "").strip()
-
 
 def ledger_dir(config, workspace_id):
     return Path(config["ledger_root"]) / "workspaces" / workspace_id
@@ -151,144 +95,6 @@ def cleanup_runs_dir(config):
     return Path(config["ledger_root"]) / "runs"
 
 
-class WorkspaceLedger:
-    def __init__(self, config):
-        self.config = config
-
-    def ledger_dir(self, workspace_id):
-        return Path(self.config["ledger_root"]) / "workspaces" / workspace_id
-
-    def workspace_yaml_path(self, workspace_id):
-        return self.ledger_dir(workspace_id) / "workspace.yaml"
-
-    def workspace_root_path(self, workspace_id):
-        return Path(self.config["workspace_root"]) / workspace_id
-
-    def vscode_workspace_path(self, workspace_id):
-        return self.workspace_root_path(workspace_id) / f"{workspace_id}.code-workspace"
-
-    def issues_dir(self, workspace_id):
-        return self.ledger_dir(workspace_id) / "issues"
-
-    def issue_path(self, workspace_id, issue_id):
-        return self.issues_dir(workspace_id) / f"{slug(issue_id)}.md"
-
-    def runs_dir(self, workspace_id):
-        return self.ledger_dir(workspace_id) / "runs"
-
-    def cleanup_runs_dir(self):
-        return Path(self.config["ledger_root"]) / "runs"
-
-    def load(self, workspace_id):
-        path = self.workspace_yaml_path(workspace_id)
-        if not path.exists():
-            raise SystemExit(f"Workspace not found: {workspace_id}")
-        return read_yaml(path)
-
-    def iter_workspaces(self):
-        workspaces = Path(self.config["ledger_root"]) / "workspaces"
-        if not workspaces.exists():
-            return
-        for meta in sorted(workspaces.glob("*/workspace.yaml")):
-            data = read_yaml(meta)
-            if data.get("id"):
-                yield data
-
-    def save(self, data):
-        data["updatedAt"] = now()
-        if data.get("cleanupStatus") == "done":
-            old_path = data.get("vscodeWorkspacePath")
-            if old_path and Path(old_path).exists():
-                Path(old_path).unlink()
-            data.pop("vscodeWorkspacePath", None)
-        else:
-            data["vscodeWorkspacePath"] = str(self.write_vscode_workspace(data))
-        write_yaml(self.workspace_yaml_path(data["id"]), data)
-
-    def build_vscode_workspace(self, data):
-        workspace_id = data["id"]
-        path = self.vscode_workspace_path(workspace_id)
-        workspace_root = path.parent
-
-        folders = [
-            {
-                "name": f"{workspace_id} ledger",
-                "path": relative_or_absolute(self.ledger_dir(workspace_id), workspace_root),
-            }
-        ]
-        seen_paths = {str(Path(self.ledger_dir(workspace_id)).resolve())}
-        for repo in data.get("repos", []):
-            repo_path = repo.get("worktreePath")
-            if not repo_path:
-                continue
-            resolved = str(Path(repo_path).expanduser().resolve())
-            if resolved in seen_paths:
-                continue
-            seen_paths.add(resolved)
-            folders.append(
-                {
-                    "name": repo.get("name") or Path(repo_path).name,
-                    "path": relative_or_absolute(repo_path, workspace_root),
-                }
-            )
-
-        payload = {
-            "folders": folders,
-            "settings": {
-                "workspaces.workspaceId": workspace_id,
-                "workspaces.ledgerPath": relative_or_absolute(
-                    self.ledger_dir(workspace_id),
-                    workspace_root,
-                ),
-            },
-        }
-        return path, payload
-
-    def write_vscode_workspace(self, data):
-        path, payload = self.build_vscode_workspace(data)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        return path
-
-    def append_note(self, workspace_id, text):
-        path = self.ledger_dir(workspace_id) / "notes.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(template("notes.md"), encoding="utf-8")
-        stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
-        with path.open("a", encoding="utf-8") as f:
-            f.write(f"\n## {stamp}\n{text.strip()}\n")
-
-    def ensure(self, workspace_id, title=None, state="captured", input_text=None):
-        root = self.ledger_dir(workspace_id)
-        meta = root / "workspace.yaml"
-        if meta.exists():
-            return read_yaml(meta)
-
-        created = now()
-        data = {
-            "id": workspace_id,
-            "title": title or workspace_id,
-            "state": state,
-            "createdAt": created,
-            "updatedAt": created,
-            "repos": [],
-            "links": {"jira": [], "githubPrs": []},
-        }
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "runs").mkdir(exist_ok=True)
-        (root / "issues").mkdir(exist_ok=True)
-        spec_input = input_text or "TBD."
-        (root / "spec.md").write_text(
-            template("spec.md").format(id=workspace_id, title=data["title"], input=spec_input),
-            encoding="utf-8",
-        )
-        (root / "notes.md").write_text(template("notes.md"), encoding="utf-8")
-        self.save(data)
-        self.append_note(workspace_id, f"Created workspace `{workspace_id}`.")
-        return data
-
-
 def load_workspace(config, workspace_id):
     return WorkspaceLedger(config).load(workspace_id)
 
@@ -301,25 +107,12 @@ def save_workspace(config, data):
     WorkspaceLedger(config).save(data)
 
 
-def relative_or_absolute(path, base):
-    path = Path(path).expanduser()
-    base = Path(base).expanduser()
-    try:
-        return os.path.relpath(path.resolve(), base.resolve())
-    except FileNotFoundError:
-        return os.path.relpath(path.absolute(), base.absolute())
-
-
 def write_vscode_workspace(config, data):
     return WorkspaceLedger(config).write_vscode_workspace(data)
 
 
 def build_vscode_workspace(config, data):
     return WorkspaceLedger(config).build_vscode_workspace(data)
-
-
-def template(name):
-    return (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")
 
 
 def append_note(config, workspace_id, text):
@@ -331,123 +124,43 @@ def ensure_workspace(config, workspace_id, title=None, state="captured", input_t
 
 
 def sandcastle_branch(workspace_id, issue_id):
-    return f"sandcastle/{slug(workspace_id)}/{slug(issue_id)}"
+    return issue_model.sandcastle_branch(workspace_id, issue_id)
 
 
 def split_frontmatter(text):
-    if not text.startswith("---\n"):
-        return {}, text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return {}, text
-    raw_meta = text[4:end]
-    body = text[end + len("\n---\n") :]
-    return yaml.safe_load(raw_meta) or {}, body
+    return issue_model.split_frontmatter(text)
 
 
 def issue_body_from_args(args):
-    parts = []
-    if getattr(args, "body", None):
-        parts.append(args.body.strip())
-    else:
-        parts.append("## What to build\n\nTBD.\n")
-    acceptance = getattr(args, "acceptance", None) or []
-    if acceptance:
-        lines = ["## Acceptance criteria", ""]
-        lines.extend(f"- [ ] {item}" for item in acceptance)
-        parts.append("\n".join(lines))
-    return "\n\n".join(part for part in parts if part).strip() + "\n"
+    return issue_model.issue_body_from_args(args)
 
 
 def normalize_issue_meta(config, workspace_id, issue_id, meta):
-    issue_id = str(meta.get("id") or issue_id)
-    issue_type = str(meta.get("type") or "AFK").upper()
-    if issue_type not in ISSUE_TYPES:
-        raise SystemExit(f"Invalid issue type for {issue_id}: {issue_type}")
-    blocked_by = meta.get("blockedBy") or []
-    if isinstance(blocked_by, str):
-        blocked_by = [blocked_by]
-    status = str(meta.get("status") or "planned")
-    created = meta.get("createdAt") or now()
-    normalized = {
-        "id": issue_id,
-        "title": meta.get("title") or issue_id,
-        "type": issue_type,
-        "status": status,
-        "blockedBy": [str(item) for item in blocked_by],
-        "branch": meta.get("branch") or sandcastle_branch(workspace_id, issue_id),
-        "reviewStatus": meta.get("reviewStatus") or "pending",
-        "createdAt": created,
-        "updatedAt": now(),
-    }
-    for key, value in meta.items():
-        if key not in normalized:
-            normalized[key] = value
-    return normalized
+    return issue_model.normalize_issue_meta(WorkspaceLedger(config), workspace_id, issue_id, meta)
 
 
 def write_issue(config, workspace_id, issue_id, meta, body):
-    meta = normalize_issue_meta(config, workspace_id, issue_id, meta)
-    path = issue_path(config, workspace_id, meta["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frontmatter = yaml.safe_dump(meta, sort_keys=False, allow_unicode=False).strip()
-    path.write_text(f"---\n{frontmatter}\n---\n{body.strip()}\n", encoding="utf-8")
-    return path, meta
+    return issue_model.write_issue(WorkspaceLedger(config), workspace_id, issue_id, meta, body)
 
 
 def read_issue(path):
-    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
-    issue_id = meta.get("id") or path.stem
-    return {"path": path, "meta": meta, "body": body, "id": str(issue_id)}
+    return issue_model.read_issue(path)
 
 
 def iter_issues(config, workspace_id):
-    root = issues_dir(config, workspace_id)
-    if not root.exists():
-        return []
-    issues = [read_issue(path) for path in sorted(root.glob("*.md"))]
-    issues.sort(
-        key=lambda item: (
-            ISSUE_STATUS_ORDER.get(item["meta"].get("status", ""), 99),
-            str(item["meta"].get("id", "")),
-        )
-    )
-    return issues
+    return issue_model.iter_issues(WorkspaceLedger(config), workspace_id)
 
 
 def issue_index(config, workspace_id):
-    return {issue["id"]: issue for issue in iter_issues(config, workspace_id)}
+    return issue_model.issue_index(WorkspaceLedger(config), workspace_id)
 
 
 def blockers_complete(index, issue):
-    for blocker_id in issue["meta"].get("blockedBy") or []:
-        blocker = index.get(str(blocker_id))
-        if not blocker:
-            return False
-        if blocker["meta"].get("status") not in ISSUE_DONE_STATUSES:
-            return False
-    return True
+    return issue_model.blockers_complete(index, issue)
 
 
 def ready_issues(config, workspace_id):
-    index = issue_index(config, workspace_id)
-    ready = []
-    blocked_hitl = []
-    for issue in index.values():
-        meta = issue["meta"]
-        status = meta.get("status")
-        issue_type = str(meta.get("type") or "AFK").upper()
-        if status not in ISSUE_ACTIVE_STATUSES:
-            continue
-        if not blockers_complete(index, issue):
-            continue
-        if issue_type == "AFK":
-            ready.append(issue)
-        elif issue_type == "HITL":
-            blocked_hitl.append(issue)
-    ready.sort(key=lambda item: str(item["meta"].get("id", "")))
-    blocked_hitl.sort(key=lambda item: str(item["meta"].get("id", "")))
-    return ready, blocked_hitl
+    return issue_model.ready_issues(WorkspaceLedger(config), workspace_id)
 
 
 def select_repo(data, repo_name=None):
@@ -466,18 +179,7 @@ def select_repo(data, repo_name=None):
 
 
 def issue_payload(issue):
-    meta = issue["meta"]
-    return {
-        "id": meta.get("id"),
-        "title": meta.get("title"),
-        "type": meta.get("type"),
-        "status": meta.get("status"),
-        "blockedBy": meta.get("blockedBy") or [],
-        "branch": meta.get("branch"),
-        "reviewStatus": meta.get("reviewStatus"),
-        "path": str(issue["path"]),
-        "body": issue["body"].strip(),
-    }
+    return issue_model.issue_payload(issue)
 
 
 def write_sandcastle_plan(config, data, repo, ready, hitl, limit=None):
@@ -549,42 +251,19 @@ def set_issue_status(
     branch=None,
     extra=None,
 ):
-    path = issue_path(config, workspace_id, issue_id)
-    if not path.exists():
-        raise SystemExit(f"Issue not found: {issue_id}")
-    issue = read_issue(path)
-    meta = dict(issue["meta"])
-    old_status = meta.get("status")
-    meta["status"] = status
-    if review_status:
-        meta["reviewStatus"] = review_status
-    if branch:
-        meta["branch"] = branch
-    for key, value in (extra or {}).items():
-        if key not in {"id", "note"}:
-            meta[key] = value
-    path, meta = write_issue(config, workspace_id, issue_id, meta, issue["body"])
-    return path, meta, old_status
+    return issue_model.set_issue_status(
+        WorkspaceLedger(config),
+        workspace_id,
+        issue_id,
+        status,
+        review_status=review_status,
+        branch=branch,
+        extra=extra,
+    )
 
 
 def maybe_mark_user_review(config, workspace_id):
-    issues = iter_issues(config, workspace_id)
-    if not issues:
-        return False
-    if any(issue["meta"].get("status") not in ISSUE_DONE_STATUSES for issue in issues):
-        return False
-    data = load_workspace(config, workspace_id)
-    if data.get("state") in {"closed", "dev-complete", "user-review"}:
-        return False
-    old_state = data.get("state")
-    data["state"] = "user-review"
-    save_workspace(config, data)
-    append_note(
-        config,
-        workspace_id,
-        f"State changed from `{old_state}` to `user-review` because all local issues are complete.",
-    )
-    return True
+    return issue_model.maybe_mark_user_review(WorkspaceLedger(config), workspace_id)
 
 
 def apply_sandcastle_result(config, workspace_id, result_path):
@@ -655,572 +334,52 @@ def init_sandcastle_runner(repo, force=False):
     return written
 
 
-def path_is_under(path, parent):
-    try:
-        Path(path).resolve().relative_to(Path(parent).resolve())
-        return True
-    except ValueError:
-        return False
-
-
-class CleanupSafety:
-    def __init__(self, config):
-        self.config = config
-        self.ledger = WorkspaceLedger(config)
-
-    def workspace_root_extra_paths(self, data):
-        root = self.ledger.workspace_root_path(data["id"])
-        if not root.exists():
-            return []
-        expected = {".workspace-id", f"{data['id']}.code-workspace"}
-        for repo in data.get("repos", []):
-            path = repo.get("worktreePath")
-            if path and path_is_under(path, root):
-                rel = Path(path).resolve().relative_to(root.resolve())
-                if rel.parts:
-                    expected.add(rel.parts[0])
-        return [
-            str(item)
-            for item in sorted(root.iterdir())
-            if item.name not in expected
-        ]
-
-    def workspace_candidates(self, workspace_ids):
-        return [self.workspace_candidate(workspace_id) for workspace_id in workspace_ids]
-
-    def workspace_candidate(self, workspace_id):
-        data = self.ledger.load(workspace_id)
-        root = self.ledger.workspace_root_path(workspace_id)
-        repo_rows = []
-        dirty_repos = []
-        missing_repos = []
-        non_linked_repos = []
-        external_repos = []
-        total_ahead = 0
-        for repo in data.get("repos", []):
-            path = repo.get("worktreePath")
-            exists = bool(path and Path(path).exists())
-            row = {
-                "name": repo.get("name"),
-                "path": path,
-                "branch": repo.get("branch"),
-                "exists": exists,
-                "dirty": None,
-                "aheadOfBase": None,
-                "linkedWorktree": None,
-                "underWorkspaceRoot": None,
-            }
-            if exists:
-                info = git_info(path, self.config)
-                row["branch"] = info.get("branch")
-                row["dirty"] = info["dirty"]
-                row["aheadOfBase"] = info["aheadOfBase"]
-                row["linkedWorktree"] = is_linked_worktree(path)
-                row["underWorkspaceRoot"] = path_is_under(path, root)
-                if row["dirty"]:
-                    dirty_repos.append(repo.get("name") or path)
-                if row["aheadOfBase"]:
-                    total_ahead += row["aheadOfBase"]
-                if not row["linkedWorktree"]:
-                    non_linked_repos.append(repo.get("name") or path)
-                if not row["underWorkspaceRoot"]:
-                    external_repos.append(repo.get("name") or path)
-            else:
-                missing_repos.append(repo.get("name") or path or "?")
-            repo_rows.append(row)
-
-        extra_paths = self.workspace_root_extra_paths(data)
-        prs = data.get("links", {}).get("githubPrs", [])
-        open_prs = [
-            pr
-            for pr in prs
-            if str(pr.get("state") or "").upper() not in {"CLOSED", "MERGED"}
-            and not pr.get("merged")
-        ]
-        candidate = {
-            "workspace": workspace_id,
-            "title": data.get("title"),
-            "state": data.get("state"),
-            "workspaceRoot": str(root),
-            "workspaceRootExists": root.exists(),
-            "repos": repo_rows,
-            "repoCount": len(repo_rows),
-            "existingRepoCount": len([repo for repo in repo_rows if repo["exists"]]),
-            "dirtyRepos": dirty_repos,
-            "missingRepos": missing_repos,
-            "nonLinkedRepos": non_linked_repos,
-            "externalRepos": external_repos,
-            "extraPaths": extra_paths,
-            "aheadOfBase": total_ahead,
-            "prCount": len(prs),
-            "openPrCount": len(open_prs),
-            "recommendedAction": "needs-review",
-            "reason": "",
-        }
-
-        reasons = []
-        if data.get("state") not in DONE_STATES:
-            reasons.append("workspace is not closed or dev-complete")
-        if dirty_repos:
-            reasons.append("repo worktree has uncommitted changes")
-        if non_linked_repos:
-            reasons.append("repo is not a linked git worktree")
-        if external_repos:
-            reasons.append("repo worktree is outside the workspace root")
-        if extra_paths:
-            reasons.append("workspace root contains extra files")
-        if open_prs:
-            reasons.append("workspace has open PR snapshots")
-
-        if reasons:
-            candidate["reason"] = "; ".join(reasons)
-        elif not candidate["workspaceRootExists"] and candidate["existingRepoCount"] == 0:
-            candidate["recommendedAction"] = "mark-done"
-            candidate["reason"] = "workspace worktrees are already gone"
-        else:
-            candidate["recommendedAction"] = "safe-to-remove"
-            candidate["reason"] = "workspace is done and worktrees are clean linked worktrees"
-        return candidate
-
-    def print_workspace_plan(self, candidates):
-        if not candidates:
-            print("No workspace cleanup candidates found.")
-            return
-        print(
-            f"{'WORKSPACE':24} {'STATE':14} {'ACTION':14} {'REPOS':5} "
-            f"{'DIRTY':5} {'AHEAD':5} {'PRS':3} REASON"
-        )
-        for item in candidates:
-            print(
-                f"{item['workspace'][:24]:24} "
-                f"{str(item['state'] or '-')[:14]:14} "
-                f"{item['recommendedAction'][:14]:14} "
-                f"{str(item['existingRepoCount'])[:5]:5} "
-                f"{str(len(item['dirtyRepos']))[:5]:5} "
-                f"{str(item['aheadOfBase'])[:5]:5} "
-                f"{str(item['openPrCount'])[:3]:3} "
-                f"{item['reason']}"
-            )
-
-    def snapshot(self, candidate):
-        return {
-            "workspace": candidate.get("workspace"),
-            "state": candidate.get("state"),
-            "workspaceRoot": candidate.get("workspaceRoot"),
-            "workspaceRootExists": candidate.get("workspaceRootExists"),
-            "repoCount": candidate.get("repoCount"),
-            "existingRepoCount": candidate.get("existingRepoCount"),
-            "dirtyRepos": candidate.get("dirtyRepos") or [],
-            "missingRepos": candidate.get("missingRepos") or [],
-            "nonLinkedRepos": candidate.get("nonLinkedRepos") or [],
-            "externalRepos": candidate.get("externalRepos") or [],
-            "extraPaths": candidate.get("extraPaths") or [],
-            "aheadOfBase": candidate.get("aheadOfBase"),
-            "openPrCount": candidate.get("openPrCount"),
-            "recommendedAction": candidate.get("recommendedAction"),
-            "reason": candidate.get("reason"),
-            "repos": [
-                {
-                    "name": repo.get("name"),
-                    "path": repo.get("path"),
-                    "branch": repo.get("branch"),
-                    "exists": repo.get("exists"),
-                    "dirty": repo.get("dirty"),
-                    "aheadOfBase": repo.get("aheadOfBase"),
-                    "linkedWorktree": repo.get("linkedWorktree"),
-                    "underWorkspaceRoot": repo.get("underWorkspaceRoot"),
-                }
-                for repo in candidate.get("repos", [])
-            ],
-        }
-
-    def write_plan(self, candidates):
-        stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-        path = self.ledger.cleanup_runs_dir() / f"cleanup-plan-{stamp}.json"
-        payload = {
-            "version": 1,
-            "type": "workspace-cleanup",
-            "createdAt": now(),
-            "candidates": candidates,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        return path, payload
-
-    def load_plan(self, path):
-        plan_path = Path(path).expanduser()
-        if not plan_path.exists():
-            raise SystemExit(f"Cleanup plan not found: {plan_path}")
-        try:
-            payload = json.loads(plan_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise SystemExit(f"Invalid cleanup plan JSON: {plan_path}\n{error}") from error
-        if payload.get("type") != "workspace-cleanup":
-            raise SystemExit(f"Cleanup plan is not a workspace cleanup plan: {plan_path}")
-        return payload
-
-    def validate_plan_candidate(self, plan, workspace_id):
-        planned = {
-            str(candidate.get("workspace")): candidate
-            for candidate in plan.get("candidates", [])
-        }.get(str(workspace_id))
-        if not planned:
-            raise SystemExit(f"Workspace `{workspace_id}` is not in cleanup plan.")
-        if planned.get("recommendedAction") not in {"safe-to-remove", "mark-done"}:
-            raise SystemExit(
-                f"Workspace `{workspace_id}` was not approved as safe in the plan: "
-                f"{planned.get('recommendedAction')}"
-            )
-        current = self.workspace_candidate(workspace_id)
-        if self.snapshot(current) != self.snapshot(planned):
-            raise SystemExit(
-                f"Cleanup plan is stale for `{workspace_id}`. Run cleanup-plan again."
-            )
-        return current
-
-    def cleanup_workspace(self, workspace_id):
-        candidate = self.workspace_candidate(workspace_id)
-        action = candidate["recommendedAction"]
-        if action not in {"safe-to-remove", "mark-done"}:
-            raise SystemExit(
-                f"Refusing cleanup for {workspace_id}: {candidate['reason']} ({action})"
-            )
-
-        data = self.ledger.load(workspace_id)
-        if action == "safe-to-remove":
-            for repo in data.get("repos", []):
-                path = repo.get("worktreePath")
-                if not path or not Path(path).exists():
-                    continue
-                source_path = repo.get("sourcePath")
-                git_cwd = source_path if source_path and Path(source_path).exists() else path
-                run(["git", "-C", str(git_cwd), "worktree", "remove", str(path)])
-            root = self.ledger.workspace_root_path(workspace_id)
-            if root.exists():
-                shutil.rmtree(root)
-
-        data["state"] = "closed"
-        data["cleanupStatus"] = "done"
-        data["cleanupAt"] = now()
-        data["cleanupAction"] = action
-        self.ledger.save(data)
-        self.ledger.append_note(workspace_id, f"Cleaned up workspace with action `{action}`.")
-        return {**candidate, "cleanupStatus": data["cleanupStatus"]}
-
-    def issue_candidates(self, workspace_ids, repo_name=None):
-        candidates = []
-        for workspace_id in workspace_ids:
-            data = self.ledger.load(workspace_id)
-            repo = select_repo(data, repo_name)
-            candidates.extend(self.issue_candidates_for_workspace(workspace_id, data, repo))
-        return candidates
-
-    def issue_candidates_for_workspace(self, workspace_id, data, repo):
-        repo_path = repo.get("worktreePath")
-        task_branch = repo.get("branch")
-        repo_exists = bool(repo_path and Path(repo_path).exists())
-        candidates = []
-        for issue in iter_issues(self.config, workspace_id):
-            meta = issue["meta"]
-            if meta.get("status") not in ISSUE_DONE_STATUSES:
-                continue
-            if meta.get("cleanupStatus") != "pending":
-                continue
-            branch = meta.get("branch")
-            item = f"{workspace_id}:{meta.get('id')}"
-            candidate = {
-                "item": item,
-                "workspace": workspace_id,
-                "workspaceState": data.get("state"),
-                "repo": repo.get("name"),
-                "repoPath": repo_path,
-                "taskBranch": task_branch,
-                "issue": meta.get("id"),
-                "issueTitle": meta.get("title"),
-                "issueStatus": meta.get("status"),
-                "cleanupStatus": meta.get("cleanupStatus"),
-                "branch": branch,
-                "branchExists": False,
-                "mergedIntoTaskBranch": None,
-                "worktreePath": None,
-                "worktreeDirty": None,
-                "recommendedAction": "needs-review",
-                "reason": "",
-            }
-            if not repo_exists:
-                candidate["reason"] = "repo worktree is missing"
-                candidates.append(candidate)
-                continue
-            if not branch:
-                candidate["reason"] = "issue has no child branch"
-                candidates.append(candidate)
-                continue
-            if branch == task_branch:
-                candidate["reason"] = "child branch equals workspace task branch"
-                candidates.append(candidate)
-                continue
-
-            child_worktree = worktree_for_branch(repo_path, branch)
-            candidate["worktreePath"] = child_worktree
-            if child_worktree:
-                candidate["worktreeDirty"] = worktree_dirty(child_worktree)
-                if candidate["worktreeDirty"]:
-                    candidate["reason"] = "child worktree has uncommitted changes"
-                    candidates.append(candidate)
-                    continue
-
-            candidate["branchExists"] = branch_exists(repo_path, branch)
-            candidate["mergedIntoTaskBranch"] = branch_merged(
-                repo_path,
-                branch,
-                task_branch,
-            )
-            if not candidate["branchExists"] and not child_worktree:
-                candidate["recommendedAction"] = "mark-done"
-                candidate["reason"] = "child branch and worktree are already gone"
-            elif candidate["mergedIntoTaskBranch"] is True:
-                candidate["recommendedAction"] = "safe-to-delete"
-                candidate["reason"] = "child branch is merged into task branch"
-            else:
-                candidate["reason"] = "child branch is not safely merged into task branch"
-            candidates.append(candidate)
-        return candidates
-
-    def print_issue_plan(self, candidates):
-        if not candidates:
-            print("No cleanup candidates found.")
-            return
-        print(
-            f"{'ITEM':24} {'ACTION':14} {'BRANCH':32} {'MERGED':6} {'DIRTY':5} REASON"
-        )
-        for item in candidates:
-            merged = item["mergedIntoTaskBranch"]
-            dirty = item["worktreeDirty"]
-            print(
-                f"{item['item'][:24]:24} "
-                f"{item['recommendedAction'][:14]:14} "
-                f"{str(item['branch'] or '-')[:32]:32} "
-                f"{str(merged)[:6]:6} "
-                f"{str(dirty)[:5]:5} "
-                f"{item['reason']}"
-            )
-
-    def cleanup_item(self, item, repo_name=None):
-        if ":" not in item:
-            raise SystemExit(f"Cleanup item must be WORKSPACE:ISSUE, got: {item}")
-        workspace_id, issue_id = item.split(":", 1)
-        matches = [
-            candidate
-            for candidate in self.issue_candidates([workspace_id], repo_name=repo_name)
-            if str(candidate.get("issue")) == issue_id
-        ]
-        if not matches:
-            raise SystemExit(f"No cleanup candidate found for {item}")
-        candidate = matches[0]
-        action = candidate["recommendedAction"]
-        if action not in {"safe-to-delete", "mark-done"}:
-            raise SystemExit(
-                f"Refusing cleanup for {item}: {candidate['reason']} ({action})"
-            )
-
-        repo_path = candidate["repoPath"]
-        if action == "safe-to-delete":
-            child_worktree = candidate.get("worktreePath")
-            if child_worktree:
-                run(["git", "-C", str(repo_path), "worktree", "remove", child_worktree])
-            if candidate.get("branchExists"):
-                run(["git", "-C", str(repo_path), "branch", "-d", candidate["branch"]])
-
-        issue = issue_index(self.config, workspace_id).get(issue_id)
-        extra = {
-            "cleanupStatus": "done",
-            "cleanupAt": now(),
-            "cleanupAction": action,
-        }
-        _, meta, _ = set_issue_status(
-            self.config,
-            workspace_id,
-            issue_id,
-            issue["meta"]["status"],
-            review_status=issue["meta"].get("reviewStatus"),
-            branch=issue["meta"].get("branch"),
-            extra=extra,
-        )
-        data = self.ledger.load(workspace_id)
-        self.ledger.save(data)
-        self.ledger.append_note(workspace_id, f"Cleaned up `{item}` with action `{action}`.")
-        return {**candidate, "cleanupStatus": meta.get("cleanupStatus")}
+def cleanup_safety(config):
+    return CleanupSafety(config, select_repo)
 
 
 def workspace_root_extra_paths(config, data):
-    return CleanupSafety(config).workspace_root_extra_paths(data)
+    return cleanup_safety(config).workspace_root_extra_paths(data)
 
 
 def workspace_cleanup_candidates(config, workspace_ids):
-    return CleanupSafety(config).workspace_candidates(workspace_ids)
+    return cleanup_safety(config).workspace_candidates(workspace_ids)
 
 
 def print_workspace_cleanup_plan(candidates):
-    CleanupSafety({}).print_workspace_plan(candidates)
+    cleanup_safety({}).print_workspace_plan(candidates)
 
 
 def cleanup_plan_snapshot(candidate):
-    return CleanupSafety({}).snapshot(candidate)
+    return cleanup_safety({}).snapshot(candidate)
 
 
 def write_cleanup_plan(config, candidates):
-    return CleanupSafety(config).write_plan(candidates)
+    return cleanup_safety(config).write_plan(candidates)
 
 
 def load_cleanup_plan(path):
-    return CleanupSafety({}).load_plan(path)
+    return cleanup_safety({}).load_plan(path)
 
 
 def validate_cleanup_plan_candidate(config, plan, workspace_id):
-    return CleanupSafety(config).validate_plan_candidate(plan, workspace_id)
+    return cleanup_safety(config).validate_plan_candidate(plan, workspace_id)
 
 
 def cleanup_workspace(config, workspace_id):
-    return CleanupSafety(config).cleanup_workspace(workspace_id)
+    return cleanup_safety(config).cleanup_workspace(workspace_id)
 
 
 def cleanup_candidates(config, workspace_ids, repo_name=None):
-    return CleanupSafety(config).issue_candidates(workspace_ids, repo_name=repo_name)
+    return cleanup_safety(config).issue_candidates(workspace_ids, repo_name=repo_name)
 
 
 def print_cleanup_plan(candidates):
-    CleanupSafety({}).print_issue_plan(candidates)
+    cleanup_safety({}).print_issue_plan(candidates)
 
 
 def cleanup_item(config, item, repo_name=None):
-    return CleanupSafety(config).cleanup_item(item, repo_name=repo_name)
-
-
-def repo_name_from_remote(remote_url):
-    remote_url = remote_url.strip()
-    if remote_url.startswith("git@"):
-        _, rest = remote_url.split(":", 1)
-        return rest.removesuffix(".git")
-    if remote_url.startswith("https://") or remote_url.startswith("ssh://"):
-        parsed = urlparse(remote_url)
-        return parsed.path.strip("/").removesuffix(".git")
-    return remote_url.removesuffix(".git")
-
-
-def github_repo_from_remote(remote_url):
-    name = repo_name_from_remote(remote_url)
-    if "/" in name:
-        return name
-    return None
-
-
-def git_root(path):
-    try:
-        root = run(["git", "-C", str(path), "rev-parse", "--show-toplevel"])
-        return Path(root)
-    except SystemExit:
-        return None
-
-
-def git_info(path, config):
-    root = git_root(path)
-    if root is None:
-        raise SystemExit(f"Not inside a git repo: {path}")
-    branch = run(["git", "-C", str(root), "branch", "--show-current"], check=False)
-    origin = run(["git", "-C", str(root), "remote", "get-url", "origin"], check=False)
-    fork = run(["git", "-C", str(root), "remote", "get-url", config["push_remote"]], check=False)
-    status = run(["git", "-C", str(root), "status", "--short"], check=False)
-    ahead = run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "rev-list",
-            "--count",
-            f"{config['base_remote']}/{config['base_branch']}..HEAD",
-        ],
-        check=False,
-    )
-    return {
-        "root": str(root),
-        "name": root.name,
-        "branch": branch or None,
-        "remote": origin or None,
-        "forkRemote": fork or None,
-        "dirty": bool(status),
-        "aheadOfBase": int(ahead) if ahead.isdigit() else None,
-    }
-
-
-def git_success(path, args):
-    proc = subprocess.run(
-        ["git", "-C", str(path), *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    return proc.returncode == 0
-
-
-def git_resolved_path(path, arg):
-    output = run(["git", "-C", str(path), "rev-parse", arg], check=False)
-    if not output:
-        return None
-    candidate = Path(output)
-    if not candidate.is_absolute():
-        candidate = Path(path) / candidate
-    return candidate.resolve()
-
-
-def is_linked_worktree(path):
-    git_dir = git_resolved_path(path, "--git-dir")
-    common_dir = git_resolved_path(path, "--git-common-dir")
-    if not git_dir or not common_dir:
-        return False
-    return git_dir != common_dir
-
-
-def git_worktrees(path):
-    output = run(["git", "-C", str(path), "worktree", "list", "--porcelain"], check=False)
-    entries = []
-    current = {}
-    for line in output.splitlines():
-        if line.startswith("worktree "):
-            if current:
-                entries.append(current)
-            current = {"path": line.removeprefix("worktree ").strip(), "branch": None}
-        elif line.startswith("branch ") and current:
-            ref = line.removeprefix("branch ").strip()
-            current["branch"] = ref.removeprefix("refs/heads/")
-    if current:
-        entries.append(current)
-    return entries
-
-
-def worktree_for_branch(path, branch):
-    for entry in git_worktrees(path):
-        if entry.get("branch") == branch:
-            return entry.get("path")
-    return None
-
-
-def branch_exists(path, branch):
-    return git_success(path, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
-
-
-def branch_merged(path, branch, target_branch):
-    if not branch_exists(path, branch):
-        return None
-    if not target_branch:
-        return False
-    if not branch_exists(path, target_branch):
-        return False
-    return git_success(path, ["merge-base", "--is-ancestor", branch, target_branch])
-
-
-def worktree_dirty(path):
-    return bool(run(["git", "-C", str(path), "status", "--porcelain"], check=False))
+    return cleanup_safety(config).cleanup_item(item, repo_name=repo_name)
 
 
 def upsert_repo(data, repo):
