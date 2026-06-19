@@ -9,7 +9,7 @@ Use this skill to keep a local workspace ledger up to date while doing developme
 
 ## Layout
 
-- Skill/tooling repo: `/home/rmanak/git/workspaces`
+- Skill/tooling repo: this skill directory
 - Runtime config: `~/workspaces/config.yaml`
 - Runtime ledger: `~/workspaces/_ledger/workspaces/<workspace-id>/`
 - Code worktrees: `~/workspaces/<workspace-id>/<repo>/`
@@ -38,7 +38,7 @@ Use one mutable `spec.md`. Append notes at the bottom of `notes.md`.
 Before using the skill, ensure config exists:
 
 ```bash
-/home/rmanak/git/workspaces/scripts/workspace.py init-config
+scripts/workspace.py init-config
 ```
 
 The config is simple YAML. Defaults are shown in `templates/config.yaml`.
@@ -54,41 +54,41 @@ Important defaults:
 
 ## Commands
 
-Use the helper script for deterministic file and git operations:
+Use the helper script for deterministic file and git operations. Paths below are relative to this skill directory, so an installed copy can run from any skill root:
 
 ```bash
-/home/rmanak/git/workspaces/scripts/workspace.py create <id> --title "<title>"
-/home/rmanak/git/workspaces/scripts/workspace.py create <id> --repo <repo>
-/home/rmanak/git/workspaces/scripts/workspace.py adopt <path> --id <id>
-/home/rmanak/git/workspaces/scripts/workspace.py open <id>
-/home/rmanak/git/workspaces/scripts/workspace.py doctor <id> [--fix]
-/home/rmanak/git/workspaces/scripts/workspace.py list [--active] [--state <state>] [--all]
-/home/rmanak/git/workspaces/scripts/workspace.py status [id]
-/home/rmanak/git/workspaces/scripts/workspace.py note <id> "note text"
-/home/rmanak/git/workspaces/scripts/workspace.py state <id> <state>
-/home/rmanak/git/workspaces/scripts/workspace.py repo list <id>
-/home/rmanak/git/workspaces/scripts/workspace.py repo add <id> <repo>
-/home/rmanak/git/workspaces/scripts/workspace.py repo adopt <id> <path> [--name <name>]
-/home/rmanak/git/workspaces/scripts/workspace.py repo refresh <id> [repo]
-/home/rmanak/git/workspaces/scripts/workspace.py repo remove <id> <repo> [--delete-worktree]
-/home/rmanak/git/workspaces/scripts/workspace.py issue create <id> <issue-id> --title "<title>"
-/home/rmanak/git/workspaces/scripts/workspace.py issue list <id> [--all] [--status <status>] [--type AFK|HITL]
-/home/rmanak/git/workspaces/scripts/workspace.py issue ready <id> [--json]
-/home/rmanak/git/workspaces/scripts/workspace.py issue show <id> <issue-id>
-/home/rmanak/git/workspaces/scripts/workspace.py issue set-status <id> <issue-id> <status>
-/home/rmanak/git/workspaces/scripts/workspace.py sandcastle <id> [--repo <repo>] [--json]
-/home/rmanak/git/workspaces/scripts/workspace.py sandcastle <id> --init-runner [--force]
-/home/rmanak/git/workspaces/scripts/workspace.py sandcastle <id> --execute --command "<repo-local command>"
-/home/rmanak/git/workspaces/scripts/workspace.py sandcastle <id> --reconcile-result <result.json>
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup-plan <id> [<id> ...] [--json] [--write]
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup-plan --all --write
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup <id> [<id> ...]
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup --from-plan <plan.json> <id> [<id> ...]
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup-plan <id> --issues [--json]
-/home/rmanak/git/workspaces/scripts/workspace.py cleanup --item <id>:<issue-id> [--item <id>:<issue-id> ...]
-/home/rmanak/git/workspaces/scripts/workspace.py close <id>
-/home/rmanak/git/workspaces/scripts/workspace.py sync-github <id>
-/home/rmanak/git/workspaces/scripts/workspace.py pr <id> opened|feedback|merged
+scripts/workspace.py create <id> --title "<title>"
+scripts/workspace.py create <id> --repo <repo>
+scripts/workspace.py adopt <path> --id <id>
+scripts/workspace.py open <id>
+scripts/workspace.py doctor <id> [--fix]
+scripts/workspace.py list [--active] [--state <state>] [--all]
+scripts/workspace.py status [id]
+scripts/workspace.py note <id> "note text"
+scripts/workspace.py state <id> <state>
+scripts/workspace.py repo list <id>
+scripts/workspace.py repo add <id> <repo>
+scripts/workspace.py repo adopt <id> <path> [--name <name>]
+scripts/workspace.py repo refresh <id> [repo]
+scripts/workspace.py repo remove <id> <repo> [--delete-worktree]
+scripts/workspace.py issue create <id> <issue-id> --title "<title>"
+scripts/workspace.py issue list <id> [--all] [--status <status>] [--type AFK|HITL]
+scripts/workspace.py issue ready <id> [--json]
+scripts/workspace.py issue show <id> <issue-id>
+scripts/workspace.py issue set-status <id> <issue-id> <status>
+scripts/workspace.py sandcastle <id> [--repo <repo>] [--json]
+scripts/workspace.py sandcastle <id> --init-runner [--force]
+scripts/workspace.py sandcastle <id> --execute --command "<repo-local command>"
+scripts/workspace.py sandcastle <id> --reconcile-result <result.json>
+scripts/workspace.py cleanup-plan <id> [<id> ...] [--json] [--write]
+scripts/workspace.py cleanup-plan --all --write
+scripts/workspace.py cleanup <id> [<id> ...]
+scripts/workspace.py cleanup --from-plan <plan.json> <id> [<id> ...]
+scripts/workspace.py cleanup-plan <id> --issues [--json]
+scripts/workspace.py cleanup --item <id>:<issue-id> [--item <id>:<issue-id> ...]
+scripts/workspace.py close <id>
+scripts/workspace.py sync-github <id>
+scripts/workspace.py pr <id> opened|feedback|merged
 ```
 
 If a command is missing a behavior, inspect and edit the ledger directly rather than inventing another tracker.
