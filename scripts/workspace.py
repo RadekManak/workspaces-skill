@@ -32,6 +32,7 @@ from workspaces.git import (
     git_root,
     is_linked_worktree,
     path_is_under,
+    remove_linked_worktree,
     worktree_dirty,
 )
 from workspaces.issues import (
@@ -366,8 +367,8 @@ def validate_cleanup_plan_candidate(config, plan, workspace_id):
     return cleanup_safety(config).validate_plan_candidate(plan, workspace_id)
 
 
-def cleanup_workspace(config, workspace_id):
-    return cleanup_safety(config).cleanup_workspace(workspace_id)
+def cleanup_workspace(config, workspace_id, force=False):
+    return cleanup_safety(config).cleanup_workspace(workspace_id, force=force)
 
 
 def cleanup_candidates(config, workspace_ids, repo_name=None):
@@ -579,18 +580,11 @@ def cmd_repo_adopt(args):
 
 
 def remove_repo_worktree(config, data, repo):
-    path = repo.get("worktreePath")
-    if not path or not Path(path).exists():
-        return
-    if not is_linked_worktree(path):
-        raise SystemExit(f"Refusing to delete non-linked repo checkout: {path}")
-    if not path_is_under(path, workspace_root_path(config, data["id"])):
-        raise SystemExit(f"Refusing to delete repo outside workspace root: {path}")
-    if worktree_dirty(path):
-        raise SystemExit(f"Refusing to delete dirty repo worktree: {path}")
-    source_path = repo.get("sourcePath")
-    git_cwd = source_path if source_path and Path(source_path).exists() else path
-    run(["git", "-C", str(git_cwd), "worktree", "remove", str(path)])
+    remove_linked_worktree(
+        repo.get("worktreePath"),
+        workspace_root_path(config, data["id"]),
+        source_path=repo.get("sourcePath"),
+    )
 
 
 def cmd_repo_remove(args):
@@ -1278,6 +1272,11 @@ def cmd_cleanup_plan(args):
 
 def cmd_cleanup(args):
     config = load_config()
+    if args.force:
+        if args.from_plan:
+            raise SystemExit("--force cannot be used with --from-plan")
+        if args.item:
+            raise SystemExit("--force is only supported for workspace cleanup")
     if args.item and (args.id or args.from_plan):
         raise SystemExit("Pass workspace ids/from-plan or --item values, not both.")
     if args.from_plan and not args.id:
@@ -1293,13 +1292,14 @@ def cmd_cleanup(args):
         for workspace_id in args.id:
             if plan:
                 validate_cleanup_plan_candidate(config, plan, workspace_id)
-            results.append(cleanup_workspace(config, workspace_id))
+            results.append(cleanup_workspace(config, workspace_id, force=args.force))
     if args.json:
         print(json.dumps({"cleaned": results}, indent=2))
         return
     for result in results:
         label = result.get("item") or result.get("workspace")
-        print(f"Cleaned {label}: {result['recommendedAction']}")
+        action = result.get("cleanupAction") or result.get("recommendedAction")
+        print(f"Cleaned {label}: {action}")
 
 
 def cmd_sync_github(args):
@@ -1517,6 +1517,7 @@ def build_parser():
     p.add_argument("--item", action="append")
     p.add_argument("--from-plan")
     p.add_argument("--repo")
+    p.add_argument("--force", action="store_true")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_cleanup)
 

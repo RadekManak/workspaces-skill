@@ -11,6 +11,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT / "scripts" / "workspace.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from workspaces.git import branch_exists
 
 
 def run(cmd, *, env=None, cwd=None, check=True):
@@ -430,8 +433,8 @@ def test_workspace_cleanup_plan_and_execution(tmp):
     assert_path(worktree)
 
     active_plan = json.loads(run([str(WORKSPACE), "cleanup-plan", "TASK-7", "--json"], env=env).stdout)
-    if active_plan["candidates"][0]["recommendedAction"] != "needs-review":
-        raise AssertionError(f"Expected active workspace cleanup to need review, got {active_plan}")
+    if active_plan["candidates"][0]["recommendedAction"] != "force-eligible":
+        raise AssertionError(f"Expected active workspace cleanup to be force-eligible, got {active_plan}")
 
     run([str(WORKSPACE), "close", "TASK-7"], env=env)
     plan = json.loads(
@@ -470,6 +473,48 @@ def test_workspace_cleanup_plan_and_execution(tmp):
     data = read_yaml(tmp / "ledger" / "workspaces" / "TASK-7" / "workspace.yaml")
     if data.get("state") != "closed" or data.get("cleanupStatus") != "done":
         raise AssertionError(f"Expected closed cleaned workspace, got {data}")
+
+
+def test_workspace_force_cleanup(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp)
+    source = make_source_repo(tmp, "repo")
+    run(
+        [str(WORKSPACE), "create", "TASK-8", "--title", "Force cleanup", "--repo", "repo"],
+        env=env,
+    )
+    worktree = tmp / "workspaces" / "TASK-8" / "repo"
+    assert_path(worktree)
+    branch = run(
+        ["git", "-C", str(worktree), "branch", "--show-current"],
+        env=env,
+    ).stdout.strip()
+
+    (worktree / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
+
+    plan = json.loads(run([str(WORKSPACE), "cleanup-plan", "TASK-8", "--json"], env=env).stdout)
+    candidate = plan["candidates"][0]
+    if candidate["recommendedAction"] != "force-eligible":
+        raise AssertionError(f"Expected force-eligible workspace, got {candidate}")
+
+    refused = run([str(WORKSPACE), "cleanup", "TASK-8"], env=env, check=False)
+    if refused.returncode == 0:
+        raise AssertionError("Expected cleanup without --force to fail")
+
+    run([str(WORKSPACE), "cleanup", "TASK-8", "--force"], env=env)
+    if worktree.exists():
+        raise AssertionError(f"Expected force cleanup to remove worktree: {worktree}")
+    if (tmp / "workspaces" / "TASK-8").exists():
+        raise AssertionError("Expected force cleanup to remove the workspace root")
+    if not branch_exists(source, branch):
+        raise AssertionError(f"Expected task branch to remain on source repo: {branch}")
+
+    data = read_yaml(tmp / "ledger" / "workspaces" / "TASK-8" / "workspace.yaml")
+    if data.get("cleanupAction") != "force-removed":
+        raise AssertionError(f"Expected force-removed cleanup action, got {data}")
+    notes = (tmp / "ledger" / "workspaces" / "TASK-8" / "notes.md").read_text(encoding="utf-8")
+    if "Force-cleaned workspace." not in notes:
+        raise AssertionError(f"Expected force cleanup note, got:\n{notes}")
 
 
 def test_doctor_fix_output(tmp):
@@ -581,6 +626,7 @@ def main():
         test_repo_crud_and_pr_lifecycle,
         test_cleanup_plan_and_execution,
         test_workspace_cleanup_plan_and_execution,
+        test_workspace_force_cleanup,
         test_doctor_fix_output,
         test_doctor_multi_id_and_all,
     ]
