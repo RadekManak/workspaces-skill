@@ -472,6 +472,51 @@ def test_workspace_cleanup_plan_and_execution(tmp):
         raise AssertionError(f"Expected closed cleaned workspace, got {data}")
 
 
+def test_doctor_fix_output(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp)
+    make_source_repo(tmp, "repo")
+
+    run([str(WORKSPACE), "create", "TASK-DOC", "--title", "Doctor fix", "--repo", "repo"], env=env)
+    workspace_file = tmp / "workspaces" / "TASK-DOC" / "TASK-DOC.code-workspace"
+    assert_path(workspace_file)
+
+    workspace_file.unlink()
+
+    doctor_json = json.loads(
+        run([str(WORKSPACE), "doctor", "TASK-DOC", "--json"], env=env).stdout
+    )
+    vscode_issues = [i for i in doctor_json["issues"] if i["code"] == "vscode-workspace"]
+    if not vscode_issues:
+        raise AssertionError("Expected vscode-workspace issue before fix")
+    if vscode_issues[0].get("fixed"):
+        raise AssertionError("Expected no fixed flag before --fix")
+
+    fix_json = json.loads(
+        run([str(WORKSPACE), "doctor", "TASK-DOC", "--fix", "--json"], env=env).stdout
+    )
+    fixed_issues = [i for i in fix_json["issues"] if i.get("fixed")]
+    if not fixed_issues:
+        raise AssertionError(f"Expected fixed flag in --fix --json output: {fix_json}")
+    vscode_fixed = [i for i in fix_json["issues"] if i["code"] == "vscode-workspace"]
+    if not vscode_fixed or not vscode_fixed[0].get("fixed"):
+        raise AssertionError(f"Expected vscode-workspace to be marked fixed: {fix_json}")
+
+    # Delete again to test text output
+    workspace_file.unlink()
+
+    fix_text = run([str(WORKSPACE), "doctor", "TASK-DOC", "--fix"], env=env).stdout
+    assert_contains(fix_text, "- fixed vscode-workspace:")
+    if "- warning vscode-workspace" in fix_text:
+        raise AssertionError(f"Expected fixed prefix instead of warning: {fix_text}")
+
+    # Dirty repo should still show as warning, not fixed
+    worktree = tmp / "workspaces" / "TASK-DOC" / "repo"
+    (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+    dirty_text = run([str(WORKSPACE), "doctor", "TASK-DOC", "--fix"], env=env).stdout
+    assert_contains(dirty_text, "- warning repo-dirty:")
+
+
 def main():
     tests = [
         test_config_and_ledger_workspace,
@@ -483,6 +528,7 @@ def main():
         test_repo_crud_and_pr_lifecycle,
         test_cleanup_plan_and_execution,
         test_workspace_cleanup_plan_and_execution,
+        test_doctor_fix_output,
     ]
     for test in tests:
         with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:

@@ -720,13 +720,16 @@ def cmd_open(args):
     print(path)
 
 
-def doctor_issue(severity, code, message, fixable=False):
-    return {
+def doctor_issue(severity, code, message, fixable=False, fixed=False):
+    result = {
         "severity": severity,
         "code": code,
         "message": message,
         "fixable": fixable,
     }
+    if fixed:
+        result["fixed"] = True
+    return result
 
 
 def doctor_workspace(config, workspace_id, fix=False):
@@ -746,29 +749,33 @@ def doctor_workspace(config, workspace_id, fix=False):
     }
     for directory in required_dirs:
         if not directory.exists():
-            issues.append(doctor_issue("warning", "missing-dir", f"Missing directory: {directory}", True))
+            issue = doctor_issue("warning", "missing-dir", f"Missing directory: {directory}", True)
             if fix:
                 directory.mkdir(parents=True, exist_ok=True)
+                issue["fixed"] = True
+            issues.append(issue)
     for path, contents in required_files.items():
         if not path.exists():
-            issues.append(doctor_issue("warning", "missing-file", f"Missing file: {path}", True))
+            issue = doctor_issue("warning", "missing-file", f"Missing file: {path}", True)
             if fix:
                 path.write_text(contents, encoding="utf-8")
+                issue["fixed"] = True
+            issues.append(issue)
 
     if data.get("cleanupStatus") != "done":
         pointer = workspace_root / ".workspace-id"
         if not pointer.exists() or pointer.read_text(encoding="utf-8").strip() != workspace_id:
-            issues.append(
-                doctor_issue(
-                    "warning",
-                    "workspace-pointer",
-                    f"Missing or stale workspace pointer: {pointer}",
-                    True,
-                )
+            issue = doctor_issue(
+                "warning",
+                "workspace-pointer",
+                f"Missing or stale workspace pointer: {pointer}",
+                True,
             )
             if fix:
                 workspace_root.mkdir(parents=True, exist_ok=True)
                 pointer.write_text(workspace_id + "\n", encoding="utf-8")
+                issue["fixed"] = True
+            issues.append(issue)
 
         expected_path, expected_payload = build_vscode_workspace(config, data)
         actual_payload = None
@@ -778,16 +785,16 @@ def doctor_workspace(config, workspace_id, fix=False):
             except json.JSONDecodeError:
                 actual_payload = None
         if actual_payload != expected_payload:
-            issues.append(
-                doctor_issue(
-                    "warning",
-                    "vscode-workspace",
-                    f"Missing or stale VS Code workspace file: {expected_path}",
-                    True,
-                )
+            issue = doctor_issue(
+                "warning",
+                "vscode-workspace",
+                f"Missing or stale VS Code workspace file: {expected_path}",
+                True,
             )
             if fix:
                 write_vscode_workspace(config, data)
+                issue["fixed"] = True
+            issues.append(issue)
 
     for repo in data.get("repos", []):
         path = repo.get("worktreePath")
@@ -823,8 +830,13 @@ def print_doctor_report(workspace_id, issues):
         return
     print(f"{workspace_id}: {len(issues)} issue(s)")
     for issue in issues:
-        suffix = " fixable" if issue.get("fixable") else ""
-        print(f"- {issue['severity']} {issue['code']}{suffix}: {issue['message']}")
+        if issue.get("fixed"):
+            prefix = "fixed"
+            suffix = ""
+        else:
+            prefix = issue["severity"]
+            suffix = " fixable" if issue.get("fixable") else ""
+        print(f"- {prefix} {issue['code']}{suffix}: {issue['message']}")
 
 
 def cmd_doctor(args):
