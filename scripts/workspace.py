@@ -410,8 +410,37 @@ def cmd_init_config(args):
     if CONFIG_PATH.exists() and not args.force:
         print(f"Config already exists: {CONFIG_PATH}")
         return
+
+    template_path = SKILL_ROOT / "templates" / "config.yaml"
+    with template_path.open("r", encoding="utf-8") as f:
+        defaults = yaml.safe_load(f) or {}
+
+    if args.non_interactive:
+        values = dict(defaults)
+    else:
+        default_source = defaults.get("source_root", DEFAULT_CONFIG["source_root"])
+        default_workspace = defaults.get("workspace_root", DEFAULT_CONFIG["workspace_root"])
+
+        answer = input(f"source_root [{default_source}]: ").strip()
+        source_root = answer or default_source
+
+        answer = input(f"workspace_root [{default_workspace}]: ").strip()
+        workspace_root = answer or default_workspace
+
+        ledger_root = f"{workspace_root}/_ledger"
+
+        expanded_source = expand(source_root)
+        if not Path(expanded_source).exists():
+            print(f"Warning: source_root does not exist: {expanded_source}", file=sys.stderr)
+
+        values = dict(defaults)
+        values["source_root"] = source_root
+        values["workspace_root"] = workspace_root
+        values["ledger_root"] = ledger_root
+
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(SKILL_ROOT / "templates" / "config.yaml", CONFIG_PATH)
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(values, f, sort_keys=False, allow_unicode=False)
     print(f"Wrote {CONFIG_PATH}")
 
 
@@ -1339,6 +1368,7 @@ def build_parser():
 
     p = sub.add_parser("init-config")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--non-interactive", action="store_true")
     p.set_defaults(func=cmd_init_config)
 
     p = sub.add_parser("config")

@@ -43,7 +43,7 @@ def assert_path(path):
 
 
 def write_config(config_path, tmp):
-    run([str(WORKSPACE), "init-config"], env={"WORKSPACES_CONFIG": str(config_path)})
+    run([str(WORKSPACE), "init-config", "--non-interactive"], env={"WORKSPACES_CONFIG": str(config_path)})
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["source_root"] = str(tmp / "src")
     config["workspace_root"] = str(tmp / "workspaces")
