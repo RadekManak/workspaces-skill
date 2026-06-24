@@ -517,6 +517,59 @@ def test_doctor_fix_output(tmp):
     assert_contains(dirty_text, "- warning repo-dirty:")
 
 
+def test_doctor_multi_id_and_all(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp)
+    make_source_repo(tmp, "repo")
+
+    run([str(WORKSPACE), "create", "DOC-1", "--title", "Doctor 1", "--repo", "repo"], env=env)
+    run([str(WORKSPACE), "create", "DOC-2", "--title", "Doctor 2"], env=env)
+    run([str(WORKSPACE), "create", "DOC-3", "--title", "Doctor 3"], env=env)
+
+    result = run([str(WORKSPACE), "doctor", "DOC-1", "DOC-2"], env=env)
+    assert_contains(result.stdout, "DOC-1:")
+    assert_contains(result.stdout, "DOC-2:")
+
+    result = run([str(WORKSPACE), "doctor", "DOC-1", "DOC-2", "--fix"], env=env)
+    assert_contains(result.stdout, "DOC-1:")
+    assert_contains(result.stdout, "DOC-2:")
+
+    json_result = json.loads(
+        run([str(WORKSPACE), "doctor", "DOC-1", "DOC-2", "--json"], env=env).stdout
+    )
+    if not isinstance(json_result, list):
+        raise AssertionError(f"Expected JSON array for multiple workspaces, got {type(json_result)}")
+    if len(json_result) != 2:
+        raise AssertionError(f"Expected 2 entries in JSON array, got {len(json_result)}")
+    if {entry["workspace"] for entry in json_result} != {"DOC-1", "DOC-2"}:
+        raise AssertionError(f"Unexpected workspace ids in JSON: {json_result}")
+
+    single_json = json.loads(
+        run([str(WORKSPACE), "doctor", "DOC-1", "--json"], env=env).stdout
+    )
+    if not isinstance(single_json, dict) or "workspace" not in single_json:
+        raise AssertionError(f"Expected single JSON object for one workspace, got {single_json}")
+
+    all_result = run([str(WORKSPACE), "doctor", "--all"], env=env)
+    assert_contains(all_result.stdout, "DOC-1:")
+    assert_contains(all_result.stdout, "DOC-2:")
+    assert_contains(all_result.stdout, "DOC-3:")
+
+    all_json = json.loads(
+        run([str(WORKSPACE), "doctor", "--all", "--json"], env=env).stdout
+    )
+    if not isinstance(all_json, list):
+        raise AssertionError(f"Expected JSON array for --all, got {type(all_json)}")
+    all_ids = {entry["workspace"] for entry in all_json}
+    for expected in ("DOC-1", "DOC-2", "DOC-3"):
+        if expected not in all_ids:
+            raise AssertionError(f"Expected {expected} in --all output, got {all_ids}")
+
+    no_args = run([str(WORKSPACE), "doctor"], env=env, check=False)
+    if no_args.returncode == 0:
+        raise AssertionError("Expected doctor with no args and no CWD workspace to fail")
+
+
 def main():
     tests = [
         test_config_and_ledger_workspace,
@@ -529,6 +582,7 @@ def main():
         test_cleanup_plan_and_execution,
         test_workspace_cleanup_plan_and_execution,
         test_doctor_fix_output,
+        test_doctor_multi_id_and_all,
     ]
     for test in tests:
         with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:

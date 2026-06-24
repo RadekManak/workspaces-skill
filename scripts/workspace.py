@@ -841,11 +841,26 @@ def print_doctor_report(workspace_id, issues):
 
 def cmd_doctor(args):
     config = load_config()
-    issues = doctor_workspace(config, args.id, fix=args.fix)
+    if args.all:
+        workspace_ids = [data["id"] for data in iter_workspaces(config)]
+    elif args.id:
+        workspace_ids = args.id
+    else:
+        workspace_ids = [find_workspace_from_cwd(config)]
+    if not workspace_ids:
+        raise SystemExit("No workspaces found.")
+    results = []
+    for workspace_id in workspace_ids:
+        issues = doctor_workspace(config, workspace_id, fix=args.fix)
+        results.append({"workspace": workspace_id, "issues": issues})
     if args.json:
-        print(json.dumps({"workspace": args.id, "issues": issues}, indent=2))
+        if len(results) == 1:
+            print(json.dumps(results[0], indent=2))
+        else:
+            print(json.dumps(results, indent=2))
         return
-    print_doctor_report(args.id, issues)
+    for result in results:
+        print_doctor_report(result["workspace"], result["issues"])
 
 
 def repo_summary(data, config):
@@ -1416,7 +1431,8 @@ def build_parser():
     p.set_defaults(func=cmd_open)
 
     p = sub.add_parser("doctor")
-    p.add_argument("id")
+    p.add_argument("id", nargs="*")
+    p.add_argument("--all", action="store_true")
     p.add_argument("--fix", action="store_true")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_doctor)
