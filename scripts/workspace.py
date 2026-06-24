@@ -518,6 +518,9 @@ def cmd_adopt(args):
         },
     )
     save_workspace(config, data)
+    ws_root = workspace_root_path(config, workspace_id)
+    ws_root.mkdir(parents=True, exist_ok=True)
+    (ws_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
     append_note(config, workspace_id, f"Adopted worktree `{info['root']}` on branch `{info['branch']}`.")
     print(workspace_id)
 
