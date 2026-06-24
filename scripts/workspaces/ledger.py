@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import os
 from pathlib import Path
 
 from .common import now, read_yaml, relative_or_absolute, slug, template, write_yaml
@@ -29,6 +30,28 @@ class WorkspaceLedger:
 
     def runs_dir(self, workspace_id):
         return self.ledger_dir(workspace_id) / "runs"
+
+    def sandcastle_lock_path(self, workspace_id):
+        return self.runs_dir(workspace_id) / "active-sandcastle-run.json"
+
+    def sandcastle_run_active(self, workspace_id):
+        lock_path = self.sandcastle_lock_path(workspace_id)
+        if not lock_path.exists():
+            return False
+        try:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False
+        pid = lock.get("pid")
+        if not isinstance(pid, int):
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def cleanup_runs_dir(self):
         return Path(self.config["ledger_root"]) / "runs"

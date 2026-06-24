@@ -10,6 +10,7 @@ from .git import (
     git_info,
     is_linked_worktree,
     path_is_under,
+    remove_linked_worktree,
     worktree_dirty,
     worktree_for_branch,
 )
@@ -113,22 +114,30 @@ class CleanupSafety:
             "reason": "",
         }
 
-        reasons = []
+        soft_reasons = []
+        hard_reasons = []
         if data.get("state") not in DONE_STATES:
-            reasons.append("workspace is not closed or dev-complete")
+            soft_reasons.append("workspace is not closed or dev-complete")
         if dirty_repos:
-            reasons.append("repo worktree has uncommitted changes")
+            soft_reasons.append("repo worktree has uncommitted changes")
         if non_linked_repos:
-            reasons.append("repo is not a linked git worktree")
+            hard_reasons.append("repo is not a linked git worktree")
         if external_repos:
-            reasons.append("repo worktree is outside the workspace root")
+            hard_reasons.append("repo worktree is outside the workspace root")
         if extra_paths:
-            reasons.append("workspace root contains extra files")
+            soft_reasons.append("workspace root contains extra files")
         if open_prs:
-            reasons.append("workspace has open PR snapshots")
+            soft_reasons.append("workspace has open PR snapshots")
+        if self.ledger.sandcastle_run_active(workspace_id):
+            hard_reasons.append("sandcastle run is active")
 
+        reasons = hard_reasons + soft_reasons
         if reasons:
             candidate["reason"] = "; ".join(reasons)
+            if hard_reasons:
+                candidate["recommendedAction"] = "needs-review"
+            else:
+                candidate["recommendedAction"] = "force-eligible"
         elif not candidate["workspaceRootExists"] and candidate["existingRepoCount"] == 0:
             candidate["recommendedAction"] = "mark-done"
             candidate["reason"] = "workspace worktrees are already gone"
@@ -233,34 +242,77 @@ class CleanupSafety:
             )
         return current
 
-    def cleanup_workspace(self, workspace_id):
-        candidate = self.workspace_candidate(workspace_id)
-        action = candidate["recommendedAction"]
-        if action not in {"safe-to-remove", "mark-done"}:
-            raise SystemExit(
-                f"Refusing cleanup for {workspace_id}: {candidate['reason']} ({action})"
+    def _remove_workspace_worktrees(self, data, *, force=False):
+        root = self.ledger.workspace_root_path(data["id"])
+        for repo in data.get("repos", []):
+            remove_linked_worktree(
+                repo.get("worktreePath"),
+                root,
+                source_path=repo.get("sourcePath"),
+                force=force,
             )
 
-        data = self.ledger.load(workspace_id)
-        if action == "safe-to-remove":
-            for repo in data.get("repos", []):
-                path = repo.get("worktreePath")
-                if not path or not Path(path).exists():
-                    continue
-                source_path = repo.get("sourcePath")
-                git_cwd = source_path if source_path and Path(source_path).exists() else path
-                run(["git", "-C", str(git_cwd), "worktree", "remove", str(path)])
-            root = self.ledger.workspace_root_path(workspace_id)
-            if root.exists():
-                shutil.rmtree(root)
+    def _remove_workspace_root(self, workspace_id):
+        root = self.ledger.workspace_root_path(workspace_id)
+        if root.exists():
+            shutil.rmtree(root)
 
+    def _finalize_workspace_cleanup(self, data, candidate, action, note):
+        workspace_id = data["id"]
         data["state"] = "closed"
         data["cleanupStatus"] = "done"
         data["cleanupAt"] = now()
         data["cleanupAction"] = action
         self.ledger.save(data)
-        self.ledger.append_note(workspace_id, f"Cleaned up workspace with action `{action}`.")
-        return {**candidate, "cleanupStatus": data["cleanupStatus"]}
+        self.ledger.append_note(workspace_id, note)
+        return {**candidate, "cleanupStatus": data["cleanupStatus"], "cleanupAction": action}
+
+    def _force_cleanup_note(self, candidate):
+        parts = [f"Force-cleaned workspace. {candidate['reason']}."]
+        if candidate.get("aheadOfBase"):
+            parts.append(f"Ahead of base: {candidate['aheadOfBase']}.")
+        parts.append("Task branches kept on source repos.")
+        return " ".join(parts)
+
+    def cleanup_workspace(self, workspace_id, force=False):
+        candidate = self.workspace_candidate(workspace_id)
+        action = candidate["recommendedAction"]
+
+        if action == "needs-review":
+            raise SystemExit(
+                f"Refusing cleanup for {workspace_id}: {candidate['reason']} ({action})"
+            )
+
+        if action == "mark-done":
+            data = self.ledger.load(workspace_id)
+            return self._finalize_workspace_cleanup(
+                data,
+                candidate,
+                "mark-done",
+                "Cleaned up workspace with action `mark-done`.",
+            )
+
+        if action == "force-eligible" and not force:
+            raise SystemExit(
+                f"Refusing cleanup for {workspace_id}: {candidate['reason']} "
+                f"({action}). Pass --force."
+            )
+
+        data = self.ledger.load(workspace_id)
+        if action in {"force-eligible", "safe-to-remove"}:
+            self._remove_workspace_worktrees(data, force=action == "force-eligible")
+            self._remove_workspace_root(workspace_id)
+            cleanup_action = "force-removed" if action == "force-eligible" else "safe-to-remove"
+            note = (
+                self._force_cleanup_note(candidate)
+                if action == "force-eligible"
+                else "Cleaned up workspace with action `safe-to-remove`."
+            )
+            return self._finalize_workspace_cleanup(data, candidate, cleanup_action, note)
+
+        raise SystemExit(
+            f"Refusing cleanup for {workspace_id}: {candidate['reason']} ({action})"
+        )
 
     def issue_candidates(self, workspace_ids, repo_name=None):
         if self.select_repo is None:

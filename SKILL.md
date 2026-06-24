@@ -82,7 +82,7 @@ scripts/workspace.py sandcastle <id> --execute --command "<repo-local command>"
 scripts/workspace.py sandcastle <id> --reconcile-result <result.json>
 scripts/workspace.py cleanup-plan <id> [<id> ...] [--json] [--write]
 scripts/workspace.py cleanup-plan --all --write
-scripts/workspace.py cleanup <id> [<id> ...]
+scripts/workspace.py cleanup <id> [<id> ...] [--force]
 scripts/workspace.py cleanup --from-plan <plan.json> <id> [<id> ...]
 scripts/workspace.py cleanup-plan <id> --issues [--json]
 scripts/workspace.py cleanup --item <id>:<issue-id> [--item <id>:<issue-id> ...]
@@ -209,7 +209,7 @@ Use `cleanup-plan --all --write` for bulk cleanup review. It writes an auditable
 
 Only run `cleanup <workspace-id>` or `cleanup --from-plan <plan.json> <workspace-id>` after the user explicitly approves that workspace. Workspace cleanup removes clean linked worktrees under the configured workspace root, removes the workspace root including the generated `.code-workspace` file, keeps the ledger, and marks the workspace closed with `cleanupStatus: done`.
 
-Workspace cleanup refuses unsafe workspaces: active states, dirty repos, non-linked git checkouts, worktrees outside the workspace root, unexpected files in the workspace root, or open PR snapshots.
+Workspace cleanup refuses unsafe workspaces: active states, dirty repos, non-linked git checkouts, worktrees outside the workspace root, unexpected files in the workspace root, open PR snapshots, or an active Sandcastle run. `cleanup-plan` reports `force-eligible` when only soft blockers remain (dirty repos, extra files, open PR snapshots, or non-done state). Use `cleanup <workspace-id> --force` to remove those workspaces anyway. Force cleanup auto-closes the ledger, keeps task branches on source repos, records `cleanupAction: force-removed`, and appends a detailed note about what was overridden. `--force` cannot be used with `--from-plan` or `--item`.
 
 Per-issue branch cleanup remains available for Sandcastle child branches, but it is not the normal cleanup path. Use `cleanup-plan <workspace-id> --issues` to inspect completed issues with `cleanupStatus: pending`, then `cleanup --item <workspace-id>:<issue-id>` for approved issue-level cleanup.
 

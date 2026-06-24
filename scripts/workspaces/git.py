@@ -138,3 +138,19 @@ def branch_merged(path, branch, target_branch):
 
 def worktree_dirty(path):
     return bool(run(["git", "-C", str(path), "status", "--porcelain"], check=False))
+
+
+def remove_linked_worktree(path, workspace_root, *, source_path=None, force=False):
+    if not path or not Path(path).exists():
+        return
+    if not is_linked_worktree(path):
+        raise SystemExit(f"Refusing to delete non-linked repo checkout: {path}")
+    if not path_is_under(path, workspace_root):
+        raise SystemExit(f"Refusing to delete repo outside workspace root: {path}")
+    if not force and worktree_dirty(path):
+        raise SystemExit(f"Refusing to delete dirty repo worktree: {path}")
+    git_cwd = source_path if source_path and Path(source_path).exists() else path
+    remove_args = ["git", "-C", str(git_cwd), "worktree", "remove", str(path)]
+    if force:
+        remove_args.append("--force")
+    run(remove_args)
