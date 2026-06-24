@@ -832,6 +832,9 @@ def repo_summary(data, config):
 
 
 def cmd_list(args):
+    if args.json and args.ids_only:
+        raise SystemExit("--json and --ids-only are mutually exclusive.")
+
     config = load_config()
     rows = []
     for data in iter_workspaces(config):
@@ -857,7 +860,19 @@ def cmd_list(args):
 
     rows.sort(key=lambda row: (STATE_ORDER.get(row["state"], 99), row["updated"], row["id"]))
     if not rows:
-        print("No workspaces found.")
+        if args.json:
+            print(json.dumps([]))
+        elif not args.ids_only:
+            print("No workspaces found.")
+        return
+
+    if args.ids_only:
+        for row in rows:
+            print(row["id"])
+        return
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
         return
 
     state_counts = {}
@@ -1365,6 +1380,8 @@ def build_parser():
     p.add_argument("--state")
     p.add_argument("--active", action="store_true")
     p.add_argument("--all", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--ids-only", action="store_true")
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("note")
