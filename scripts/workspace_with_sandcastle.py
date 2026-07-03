@@ -14,4 +14,4 @@ from workspaces.cli import main
 
 
 if __name__ == "__main__":
-    main(sandcastle=False, prog="workspace.py")
+    main(sandcastle=True, prog="workspace_with_sandcastle.py")

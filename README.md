@@ -115,7 +115,7 @@ scripts/workspace.py issue create BILL-456 1 --title "Add invoice export model" 
 scripts/workspace.py issue create BILL-456 2 --title "Add export button" --blocked-by 1
 ```
 
-Inspect local issues and the dependency-ready AFK set:
+Inspect local issues and dependency-ready work:
 
 ```bash
 scripts/workspace.py issue list BILL-456
@@ -124,29 +124,29 @@ scripts/workspace.py issue ready BILL-456 --json
 scripts/workspace.py issue set-status BILL-456 1 merged
 ```
 
-Prepare a Sandcastle run plan for the dependency-ready AFK issues:
+Sandcastle/AFK runner commands use the opt-in entrypoint:
 
 ```bash
-scripts/workspace.py sandcastle BILL-456
-scripts/workspace.py sandcastle BILL-456 --json
+scripts/workspace_with_sandcastle.py sandcastle BILL-456
+scripts/workspace_with_sandcastle.py sandcastle BILL-456 --json
 ```
 
 Scaffold a repo-local Sandcastle runner:
 
 ```bash
-scripts/workspace.py sandcastle BILL-456 --init-runner
+scripts/workspace_with_sandcastle.py sandcastle BILL-456 --init-runner
 ```
 
 Execute a repo-local Sandcastle runner with the plan path in the environment:
 
 ```bash
-scripts/workspace.py sandcastle BILL-456 --execute --command "npx tsx .sandcastle/main.mts"
+scripts/workspace_with_sandcastle.py sandcastle BILL-456 --execute --command "npx tsx .sandcastle/main.mts"
 ```
 
 Reconcile a Sandcastle result file:
 
 ```bash
-scripts/workspace.py sandcastle BILL-456 --reconcile-result ~/workspaces/_ledger/workspaces/BILL-456/runs/sandcastle-result-20260618-120000-000000.json
+scripts/workspace_with_sandcastle.py sandcastle BILL-456 --reconcile-result ~/workspaces/_ledger/workspaces/BILL-456/runs/sandcastle-result-20260618-120000-000000.json
 ```
 
 Plan cleanup for completed workspaces:

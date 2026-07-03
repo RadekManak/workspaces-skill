@@ -49,11 +49,8 @@ def issue_body_from_args(args):
     return "\n\n".join(part for part in parts if part).strip() + "\n"
 
 
-def normalize_issue_meta(ledger, workspace_id, issue_id, meta):
+def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=False):
     issue_id = str(meta.get("id") or issue_id)
-    issue_type = str(meta.get("type") or "AFK").upper()
-    if issue_type not in ISSUE_TYPES:
-        raise SystemExit(f"Invalid issue type for {issue_id}: {issue_type}")
     blocked_by = meta.get("blockedBy") or []
     if isinstance(blocked_by, str):
         blocked_by = [blocked_by]
@@ -62,22 +59,26 @@ def normalize_issue_meta(ledger, workspace_id, issue_id, meta):
     normalized = {
         "id": issue_id,
         "title": meta.get("title") or issue_id,
-        "type": issue_type,
         "status": status,
         "blockedBy": [str(item) for item in blocked_by],
         "branch": meta.get("branch") or sandcastle_branch(workspace_id, issue_id),
-        "reviewStatus": meta.get("reviewStatus") or "pending",
         "createdAt": created,
         "updatedAt": now(),
     }
+    if sandcastle:
+        issue_type = str(meta.get("type") or "AFK").upper()
+        if issue_type not in ISSUE_TYPES:
+            raise SystemExit(f"Invalid issue type for {issue_id}: {issue_type}")
+        normalized["type"] = issue_type
+        normalized["reviewStatus"] = meta.get("reviewStatus") or "pending"
     for key, value in meta.items():
         if key not in normalized:
             normalized[key] = value
     return normalized
 
 
-def write_issue(ledger, workspace_id, issue_id, meta, body):
-    meta = normalize_issue_meta(ledger, workspace_id, issue_id, meta)
+def write_issue(ledger, workspace_id, issue_id, meta, body, *, sandcastle=False):
+    meta = normalize_issue_meta(ledger, workspace_id, issue_id, meta, sandcastle=sandcastle)
     path = ledger.issue_path(workspace_id, meta["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     frontmatter = yaml.safe_dump(meta, sort_keys=False, allow_unicode=False).strip()
@@ -119,7 +120,7 @@ def blockers_complete(index, issue):
     return True
 
 
-def ready_issues(ledger, workspace_id):
+def ready_issues(ledger, workspace_id, *, sandcastle=False):
     index = issue_index(ledger, workspace_id)
     ready = []
     blocked_hitl = []
@@ -131,10 +132,13 @@ def ready_issues(ledger, workspace_id):
             continue
         if not blockers_complete(index, issue):
             continue
-        if issue_type == "AFK":
+        if sandcastle:
+            if issue_type == "AFK":
+                ready.append(issue)
+            elif issue_type == "HITL":
+                blocked_hitl.append(issue)
+        else:
             ready.append(issue)
-        elif issue_type == "HITL":
-            blocked_hitl.append(issue)
     ready.sort(key=lambda item: str(item["meta"].get("id", "")))
     blocked_hitl.sort(key=lambda item: str(item["meta"].get("id", "")))
     return ready, blocked_hitl
@@ -163,6 +167,8 @@ def set_issue_status(
     review_status=None,
     branch=None,
     extra=None,
+    *,
+    sandcastle=False,
 ):
     path = ledger.issue_path(workspace_id, issue_id)
     if not path.exists():
@@ -172,13 +178,15 @@ def set_issue_status(
     old_status = meta.get("status")
     meta["status"] = status
     meta["updatedAt"] = now()
-    if review_status:
+    if sandcastle and review_status:
         meta["reviewStatus"] = review_status
     if branch:
         meta["branch"] = branch
     for key, value in (extra or {}).items():
         meta[key] = value
-    path, meta = write_issue(ledger, workspace_id, issue_id, meta, issue["body"])
+    path, meta = write_issue(
+        ledger, workspace_id, issue_id, meta, issue["body"], sandcastle=sandcastle
+    )
     return path, meta, old_status
 
 
