@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,48 @@ def assert_not_contains(haystack, needle):
 def assert_path(path):
     if not Path(path).exists():
         raise AssertionError(f"Expected path to exist: {path}")
+
+
+def first_stdout_line(stdout):
+    lines = stdout.splitlines()
+    if not lines:
+        raise AssertionError(f"Expected stdout line, got empty output:\n{stdout}")
+    return lines[0]
+
+
+def parse_final_stdout_json(stdout):
+    text = stdout.rstrip()
+    idx = text.rfind("\n{")
+    if idx == -1:
+        if text.startswith("{"):
+            return json.loads(text)
+        raise AssertionError(f"No JSON object found in stdout:\n{stdout}")
+    return json.loads(text[idx + 1 :])
+
+
+def parse_trailing_stdout_json_blocks(stdout):
+    blocks = []
+    remaining = stdout.rstrip()
+    while remaining:
+        idx = remaining.rfind("\n{")
+        if idx == -1:
+            if remaining.startswith("{"):
+                blocks.insert(0, json.loads(remaining))
+            break
+        blocks.insert(0, json.loads(remaining[idx + 1 :]))
+        remaining = remaining[:idx].rstrip()
+    return blocks
+
+
+def assert_final_vscode_json(stdout, workspace_file):
+    on_disk = json.loads(Path(workspace_file).read_text(encoding="utf-8"))
+    printed = parse_final_stdout_json(stdout)
+    if printed != on_disk:
+        raise AssertionError(
+            f"Final stdout JSON does not match on-disk .code-workspace:\n"
+            f"printed={printed}\non_disk={on_disk}"
+        )
+    return printed
 
 
 def write_config(config_path, tmp, workspace_cli):
@@ -109,18 +152,21 @@ def test_config_and_ledger_workspace(tmp, workspace_cli):
         ],
         env=env,
     )
-    ledger = Path(result.stdout.strip())
+    ledger = Path(first_stdout_line(result.stdout))
     assert_path(ledger / "workspace.yaml")
     assert_path(ledger / "spec.md")
     assert_path(ledger / "notes.md")
     assert_path(ledger / "issues")
     workspace_file = tmp / "workspaces" / "TASK-1" / "TASK-1.code-workspace"
     assert_path(workspace_file)
+    assert_final_vscode_json(result.stdout, workspace_file)
     workspace_payload = json.loads(workspace_file.read_text(encoding="utf-8"))
     folder_names = [folder["name"] for folder in workspace_payload["folders"]]
     if folder_names != ["TASK-1 ledger"]:
         raise AssertionError(f"Unexpected VS Code workspace folders: {workspace_payload}")
-    open_path = run([str(workspace_cli), "open", "TASK-1", "--print"], env=env).stdout.strip()
+    open_result = run([str(workspace_cli), "open", "TASK-1", "--print"], env=env)
+    open_path = first_stdout_line(open_result.stdout)
+    assert_final_vscode_json(open_result.stdout, workspace_file)
     if Path(open_path) != workspace_file:
         raise AssertionError(f"Unexpected open path: {open_path}")
     assert_contains((ledger / "spec.md").read_text(encoding="utf-8"), "Build something.")
@@ -136,10 +182,6 @@ def test_worktree_adopt_status_note_close(tmp, workspace_cli):
     assert_path(worktree)
     workspace_file = tmp / "workspaces" / "TASK-2" / "TASK-2.code-workspace"
     assert_path(workspace_file)
-    workspace_payload = json.loads(workspace_file.read_text(encoding="utf-8"))
-    folder_names = [folder["name"] for folder in workspace_payload["folders"]]
-    if folder_names != ["TASK-2 ledger", "repo"]:
-        raise AssertionError(f"Unexpected VS Code workspace folders: {workspace_payload}")
     status = run([str(workspace_cli), "status", "TASK-2"], env=env).stdout
     assert_contains(status, "VS Code:")
     assert_contains(status, "branch: TASK-2")
@@ -560,11 +602,14 @@ def test_doctor_fix_output(tmp, workspace_cli):
     assert_contains(fix_text, "- fixed vscode-workspace:")
     if "- warning vscode-workspace" in fix_text:
         raise AssertionError(f"Expected fixed prefix instead of warning: {fix_text}")
+    assert_final_vscode_json(fix_text, workspace_file)
 
     worktree = tmp / "workspaces" / "TASK-DOC" / "repo"
     (worktree / "dirty.txt").write_text("dirty\n", encoding="utf-8")
     dirty_text = run([str(workspace_cli), "doctor", "TASK-DOC", "--fix"], env=env).stdout
     assert_contains(dirty_text, "- warning repo-dirty:")
+    if parse_trailing_stdout_json_blocks(dirty_text):
+        raise AssertionError(f"Expected no .code-workspace JSON when doctor --fix made no repairs:\n{dirty_text}")
 
 
 def test_doctor_multi_id_and_all(tmp, workspace_cli):
@@ -615,9 +660,162 @@ def test_doctor_multi_id_and_all(tmp, workspace_cli):
         if expected not in all_ids:
             raise AssertionError(f"Expected {expected} in --all output, got {all_ids}")
 
+    # `--fix --json` for multi-id/--all must stay pure JSON: json.loads on the
+    # whole stdout fails with "Extra data" if a .code-workspace block leaked
+    # in after the doctor report, so a clean parse is itself the assertion.
+    fix_json_result = json.loads(
+        run([str(workspace_cli), "doctor", "DOC-1", "DOC-2", "--fix", "--json"], env=env).stdout
+    )
+    if not isinstance(fix_json_result, list) or len(fix_json_result) != 2:
+        raise AssertionError(f"Expected 2-entry JSON array for --fix --json, got {fix_json_result}")
+
+    fix_all_json = json.loads(
+        run([str(workspace_cli), "doctor", "--all", "--fix", "--json"], env=env).stdout
+    )
+    if not isinstance(fix_all_json, list) or len(fix_all_json) != 3:
+        raise AssertionError(f"Expected 3-entry JSON array for --all --fix --json, got {fix_all_json}")
+
     no_args = run([str(workspace_cli), "doctor"], env=env, check=False)
     if no_args.returncode == 0:
         raise AssertionError("Expected doctor with no args and no CWD workspace to fail")
+
+
+def test_doctor_fix_skips_vscode_json_for_cleanup_done_workspace(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo")
+    run(
+        [str(workspace_cli), "create", "TASK-CLEANUP-FIX", "--title", "Cleanup fix", "--repo", "repo"],
+        env=env,
+    )
+
+    workspace_root = tmp / "workspaces" / "TASK-CLEANUP-FIX"
+    workspace_file = workspace_root / "TASK-CLEANUP-FIX.code-workspace"
+    assert_path(workspace_file)
+
+    ledger_root = tmp / "ledger" / "workspaces" / "TASK-CLEANUP-FIX"
+    workspace_yaml = ledger_root / "workspace.yaml"
+    notes_path = ledger_root / "notes.md"
+    assert_path(notes_path)
+
+    # Simulate a completed cleanup: the workspace root (worktrees +
+    # .code-workspace) is gone from disk, and workspace.yaml is marked
+    # cleanupStatus: done with no vscodeWorkspacePath, mirroring what the
+    # real `cleanup` command does.
+    shutil.rmtree(workspace_root)
+    data = read_yaml(workspace_yaml)
+    data["cleanupStatus"] = "done"
+    data.pop("vscodeWorkspacePath", None)
+    workspace_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    # Break something unrelated to the .code-workspace file so `--fix` has
+    # a real, unrelated repair to make.
+    notes_path.unlink()
+
+    fix_result = run([str(workspace_cli), "doctor", "TASK-CLEANUP-FIX", "--fix"], env=env)
+    assert_contains(fix_result.stdout, "fixed missing-file")
+    assert_path(notes_path)
+
+    if workspace_root.exists():
+        raise AssertionError(
+            f"Expected doctor --fix on a cleanup-done workspace not to resurrect the "
+            f"workspace root: {workspace_root}"
+        )
+    if workspace_file.exists():
+        raise AssertionError(
+            f"Expected doctor --fix on a cleanup-done workspace not to resurrect "
+            f".code-workspace: {workspace_file}"
+        )
+    if parse_trailing_stdout_json_blocks(fix_result.stdout):
+        raise AssertionError(
+            f"Expected no .code-workspace JSON block for a cleanup-done workspace, got:\n{fix_result.stdout}"
+        )
+
+    after = read_yaml(workspace_yaml)
+    if "vscodeWorkspacePath" in after:
+        raise AssertionError(f"Expected vscodeWorkspacePath to remain absent, got {after}")
+    if after.get("cleanupStatus") != "done":
+        raise AssertionError(f"Expected cleanupStatus to remain done, got {after}")
+
+
+def test_topology_commands_print_vscode_json(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, WORKSPACE)
+    make_source_repo(tmp, "repo-a")
+    make_source_repo(tmp, "repo-b")
+
+    create_result = run(
+        [str(WORKSPACE), "create", "TOPO-1", "--title", "Topology JSON", "--repo", "repo-a"],
+        env=env,
+    )
+    workspace_file = tmp / "workspaces" / "TOPO-1" / "TOPO-1.code-workspace"
+    payload = assert_final_vscode_json(create_result.stdout, workspace_file)
+    folder_names = [folder["name"] for folder in payload["folders"]]
+    if folder_names != ["TOPO-1 ledger", "repo-a"]:
+        raise AssertionError(f"Unexpected create folders: {payload}")
+
+    worktree_a = tmp / "workspaces" / "TOPO-1" / "repo-a"
+    adopt_result = run(
+        [str(WORKSPACE), "adopt", str(worktree_a), "--id", "TOPO-ADOPT"],
+        env=env,
+    )
+    adopted_file = tmp / "workspaces" / "TOPO-ADOPT" / "TOPO-ADOPT.code-workspace"
+    payload = assert_final_vscode_json(adopt_result.stdout, adopted_file)
+    if [folder["name"] for folder in payload["folders"]] != ["TOPO-ADOPT ledger", "repo-a"]:
+        raise AssertionError(f"Unexpected adopt folders: {payload}")
+
+    add_result = run([str(WORKSPACE), "repo", "add", "TOPO-1", "repo-b"], env=env)
+    payload = assert_final_vscode_json(add_result.stdout, workspace_file)
+    if [folder["name"] for folder in payload["folders"]] != ["TOPO-1 ledger", "repo-a", "repo-b"]:
+        raise AssertionError(f"Unexpected repo add folders: {payload}")
+
+    worktree_b = tmp / "workspaces" / "TOPO-1" / "repo-b"
+    adopt_repo_result = run(
+        [str(WORKSPACE), "repo", "adopt", "TOPO-1", str(worktree_b), "--name", "repo-b-renamed"],
+        env=env,
+    )
+    payload = assert_final_vscode_json(adopt_repo_result.stdout, workspace_file)
+    if "repo-b-renamed" not in [folder["name"] for folder in payload["folders"]]:
+        raise AssertionError(f"Unexpected repo adopt folders: {payload}")
+
+    remove_result = run(
+        [str(WORKSPACE), "repo", "remove", "TOPO-1", "repo-b-renamed", "--delete-worktree"],
+        env=env,
+    )
+    payload = assert_final_vscode_json(remove_result.stdout, workspace_file)
+    if [folder["name"] for folder in payload["folders"]] != ["TOPO-1 ledger", "repo-a"]:
+        raise AssertionError(f"Unexpected repo remove folders: {payload}")
+    if worktree_b.exists():
+        raise AssertionError(f"Expected deleted worktree to be gone: {worktree_b}")
+
+    workspace_file.unlink()
+    fix_result = run([str(WORKSPACE), "doctor", "TOPO-1", "--fix"], env=env)
+    assert_final_vscode_json(fix_result.stdout, workspace_file)
+
+    open_result = run([str(WORKSPACE), "open", "TOPO-1", "--print"], env=env)
+    assert_final_vscode_json(open_result.stdout, workspace_file)
+
+    workspace_file.unlink()
+    adopted_file.unlink()
+    multi_fix = run([str(WORKSPACE), "doctor", "TOPO-1", "TOPO-ADOPT", "--fix"], env=env)
+    assert_path(workspace_file)
+    assert_path(adopted_file)
+    json_blocks = parse_trailing_stdout_json_blocks(multi_fix.stdout)
+    if len(json_blocks) != 2:
+        raise AssertionError(
+            f"Expected two .code-workspace JSON blocks for multi-id doctor --fix, got {len(json_blocks)}"
+        )
+    topo_on_disk = json.loads(workspace_file.read_text(encoding="utf-8"))
+    adopted_on_disk = json.loads(adopted_file.read_text(encoding="utf-8"))
+    if json_blocks != [topo_on_disk, adopted_on_disk]:
+        raise AssertionError(
+            f"Unexpected multi-id doctor --fix JSON blocks:\n"
+            f"blocks={json_blocks}\n"
+            f"topo={topo_on_disk}\n"
+            f"adopted={adopted_on_disk}"
+        )
+    if parse_final_stdout_json(multi_fix.stdout) != adopted_on_disk:
+        raise AssertionError("Expected final JSON block to match last fixed workspace")
 
 
 def test_cli_split_help_and_restrictions(tmp):
@@ -667,14 +865,24 @@ def test_open_identical_between_entrypoints(tmp):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, WORKSPACE)
     run([str(WORKSPACE), "create", "OPEN-CMP", "--title", "Open compare"], env=env)
-    base_open = run([str(WORKSPACE), "open", "OPEN-CMP", "--print"], env=env).stdout.strip()
-    sandcastle_open = run(
+    workspace_file = tmp / "workspaces" / "OPEN-CMP" / "OPEN-CMP.code-workspace"
+    base_result = run([str(WORKSPACE), "open", "OPEN-CMP", "--print"], env=env)
+    sandcastle_result = run(
         [str(WORKSPACE_SANDCASTLE), "open", "OPEN-CMP", "--print"], env=env
-    ).stdout.strip()
+    )
+    base_open = first_stdout_line(base_result.stdout)
+    sandcastle_open = first_stdout_line(sandcastle_result.stdout)
     if base_open != sandcastle_open:
         raise AssertionError(
             f"Expected identical open output, base={base_open!r} sandcastle={sandcastle_open!r}"
         )
+    base_json = parse_final_stdout_json(base_result.stdout)
+    sandcastle_json = parse_final_stdout_json(sandcastle_result.stdout)
+    if base_json != sandcastle_json:
+        raise AssertionError(
+            f"Expected identical open JSON, base={base_json!r} sandcastle={sandcastle_json!r}"
+        )
+    assert_final_vscode_json(base_result.stdout, workspace_file)
 
 
 def test_cross_entrypoint_issue_compat(tmp):
@@ -936,6 +1144,7 @@ BASE_TESTS = [
     test_workspace_force_cleanup,
     test_doctor_fix_output,
     test_doctor_multi_id_and_all,
+    test_doctor_fix_skips_vscode_json_for_cleanup_done_workspace,
 ]
 
 SANDCASTLE_TESTS = [
@@ -947,6 +1156,7 @@ SANDCASTLE_TESTS = [
 
 CLI_SPLIT_TESTS = [
     test_cli_split_help_and_restrictions,
+    test_topology_commands_print_vscode_json,
     test_base_issue_create_omits_sandcastle_fields,
     test_open_identical_between_entrypoints,
     test_cross_entrypoint_issue_compat,

@@ -114,6 +114,25 @@ def build_vscode_workspace(config, data):
     return WorkspaceLedger(config).build_vscode_workspace(data)
 
 
+def print_vscode_workspace_block(config, data):
+    """Append the current .code-workspace JSON as the final stdout block.
+
+    Skipped once a workspace is cleanup-done, mirroring the guard in
+    WorkspaceLedger.save(): cleanup already deleted the workspace root
+    (worktrees + .code-workspace) and dropped vscodeWorkspacePath, so there
+    is no meaningful current folder set to report. Writing/reading here
+    unconditionally would resurrect a stale .code-workspace file listing
+    repos that no longer exist on disk.
+    """
+    if data.get("cleanupStatus") == "done":
+        return
+    path = vscode_workspace_path(config, data["id"])
+    if not path.exists():
+        path = write_vscode_workspace(config, data)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    print(json.dumps(payload, indent=2))
+
+
 def append_note(config, workspace_id, text):
     WorkspaceLedger(config).append_note(workspace_id, text)
 
@@ -492,6 +511,7 @@ def cmd_create(args):
         add_source_repo_to_workspace(config, data, repo, branch=args.branch)
     save_workspace(config, data)
     print(str(ledger_dir(config, args.id)))
+    print_vscode_workspace_block(config, data)
 
 
 def cmd_adopt(args):
@@ -518,6 +538,7 @@ def cmd_adopt(args):
     (ws_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
     append_note(config, workspace_id, f"Adopted worktree `{info['root']}` on branch `{info['branch']}`.")
     print(workspace_id)
+    print_vscode_workspace_block(config, data)
 
 
 def find_repo(data, repo_name):
@@ -549,6 +570,7 @@ def cmd_repo_add(args):
     save_workspace(config, data)
     append_note(config, args.id, f"Added repo `{args.repo}` at `{dest}`.")
     print(dest)
+    print_vscode_workspace_block(config, data)
 
 
 def cmd_repo_adopt(args):
@@ -571,6 +593,7 @@ def cmd_repo_adopt(args):
     save_workspace(config, data)
     append_note(config, args.id, f"Adopted repo `{info['root']}` on branch `{info['branch']}`.")
     print(info["root"])
+    print_vscode_workspace_block(config, data)
 
 
 def remove_repo_worktree(config, data, repo):
@@ -591,6 +614,7 @@ def cmd_repo_remove(args):
     save_workspace(config, data)
     append_note(config, args.id, f"Removed repo `{args.repo}` from workspace metadata.")
     print(args.repo)
+    print_vscode_workspace_block(config, data)
 
 
 def refresh_repo(config, data, repo):
@@ -699,6 +723,7 @@ def cmd_open(args):
         path = write_vscode_workspace(config, data)
     if args.print:
         print(path)
+        print_vscode_workspace_block(config, data)
         return
     command = args.command or config.get("editor_command") or "code"
     parts = shlex.split(command)
@@ -710,6 +735,7 @@ def cmd_open(args):
         raise SystemExit(f"Editor command not found: {parts[0]}") from error
     append_note(config, args.id, f"Opened VS Code workspace `{path}`.")
     print(path)
+    print_vscode_workspace_block(config, data)
 
 
 def doctor_issue(severity, code, message, fixable=False, fixed=False):
@@ -853,6 +879,11 @@ def cmd_doctor(args):
         return
     for result in results:
         print_doctor_report(result["workspace"], result["issues"])
+    if args.fix:
+        for result in results:
+            if any(issue.get("fixed") for issue in result["issues"]):
+                data = load_workspace(config, result["workspace"])
+                print_vscode_workspace_block(config, data)
 
 
 def repo_summary(data, config):
