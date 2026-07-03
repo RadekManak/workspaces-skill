@@ -446,12 +446,14 @@ class CleanupSafety:
             "cleanupAt": now(),
             "cleanupAction": action,
         }
+        # Note: this call intentionally omits `sandcastle=True`, so it never
+        # touches the issue's sandcastle block; review_status is not passed
+        # here since set_issue_status only applies it when sandcastle=True.
         _, meta, _ = set_issue_status(
             self.ledger,
             workspace_id,
             issue_id,
             issue["meta"]["status"],
-            review_status=issue["meta"].get("reviewStatus"),
             branch=issue["meta"].get("branch"),
             extra=extra,
         )

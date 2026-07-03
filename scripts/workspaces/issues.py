@@ -18,6 +18,7 @@ ISSUE_STATUS_ORDER = {
     "done": 8,
     "skipped": 9,
 }
+LEGACY_SANDCASTLE_KEYS = {"type", "reviewStatus"}
 
 
 def sandcastle_branch(workspace_id, issue_id):
@@ -49,7 +50,52 @@ def issue_body_from_args(args):
     return "\n\n".join(part for part in parts if part).strip() + "\n"
 
 
+def _sandcastle_block(meta):
+    """Return meta's sandcastle block as a dict, treating a non-dict value as empty."""
+    block = meta.get("sandcastle")
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def normalize_legacy_sandcastle_fields(meta):
+    """Reshape legacy top-level Sandcastle fields into a nested sandcastle block.
+
+    A legacy top-level field only fills in a key the nested block doesn't
+    already define; an existing block value always wins on conflict. Legacy
+    top-level keys are removed either way so they can never resurface.
+    """
+    result = dict(meta)
+    had_block_key = "sandcastle" in result
+    block = _sandcastle_block(result)
+    if "type" in result:
+        block.setdefault("type", result.pop("type"))
+    if "reviewStatus" in result:
+        block.setdefault("reviewStatus", result.pop("reviewStatus"))
+    if block or had_block_key:
+        result["sandcastle"] = block
+    return result
+
+
+def sandcastle_issue_meta(meta):
+    """Read Sandcastle execution fields from nested or legacy top-level frontmatter.
+
+    A legacy top-level field is only consulted for a key the nested block
+    doesn't already define; the nested block always wins on conflict, mirroring
+    the write-side merge policy in `normalize_legacy_sandcastle_fields`.
+    """
+    block = _sandcastle_block(meta)
+    if "type" not in block and "type" in meta:
+        block["type"] = meta.get("type")
+    if "reviewStatus" not in block and "reviewStatus" in meta:
+        block["reviewStatus"] = meta.get("reviewStatus")
+    return {
+        "type": str(block.get("type") or "AFK").upper(),
+        "reviewStatus": block.get("reviewStatus") or "pending",
+    }
+
+
 def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=False):
+    if sandcastle:
+        meta = normalize_legacy_sandcastle_fields(meta)
     issue_id = str(meta.get("id") or issue_id)
     blocked_by = meta.get("blockedBy") or []
     if isinstance(blocked_by, str):
@@ -66,13 +112,16 @@ def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=Fal
         "updatedAt": now(),
     }
     if sandcastle:
-        issue_type = str(meta.get("type") or "AFK").upper()
+        block = _sandcastle_block(meta)
+        issue_type = str(block.get("type") or "AFK").upper()
         if issue_type not in ISSUE_TYPES:
             raise SystemExit(f"Invalid issue type for {issue_id}: {issue_type}")
-        normalized["type"] = issue_type
-        normalized["reviewStatus"] = meta.get("reviewStatus") or "pending"
+        block["type"] = issue_type
+        block["reviewStatus"] = block.get("reviewStatus") or "pending"
+        normalized["sandcastle"] = block
+    skip_keys = LEGACY_SANDCASTLE_KEYS if sandcastle else set()
     for key, value in meta.items():
-        if key not in normalized:
+        if key not in normalized and key not in skip_keys:
             normalized[key] = value
     return normalized
 
@@ -127,7 +176,7 @@ def ready_issues(ledger, workspace_id, *, sandcastle=False):
     for issue in index.values():
         meta = issue["meta"]
         status = meta.get("status")
-        issue_type = str(meta.get("type") or "AFK").upper()
+        issue_type = sandcastle_issue_meta(meta)["type"]
         if status not in ISSUE_ACTIVE_STATUSES:
             continue
         if not blockers_complete(index, issue):
@@ -146,14 +195,15 @@ def ready_issues(ledger, workspace_id, *, sandcastle=False):
 
 def issue_payload(issue):
     meta = issue["meta"]
+    sandcastle = sandcastle_issue_meta(meta)
     return {
         "id": meta.get("id"),
         "title": meta.get("title"),
-        "type": meta.get("type"),
+        "type": sandcastle["type"],
         "status": meta.get("status"),
         "blockedBy": meta.get("blockedBy") or [],
         "branch": meta.get("branch"),
-        "reviewStatus": meta.get("reviewStatus"),
+        "reviewStatus": sandcastle["reviewStatus"],
         "path": str(issue["path"]),
         "body": issue["body"].strip(),
     }
@@ -174,12 +224,16 @@ def set_issue_status(
     if not path.exists():
         raise SystemExit(f"Issue not found: {issue_id}")
     issue = read_issue(path)
-    meta = issue["meta"]
+    meta = dict(issue["meta"])
     old_status = meta.get("status")
     meta["status"] = status
     meta["updatedAt"] = now()
-    if sandcastle and review_status:
-        meta["reviewStatus"] = review_status
+    if sandcastle:
+        meta = normalize_legacy_sandcastle_fields(meta)
+        block = _sandcastle_block(meta)
+        if review_status:
+            block["reviewStatus"] = review_status
+        meta["sandcastle"] = block
     if branch:
         meta["branch"] = branch
     for key, value in (extra or {}).items():

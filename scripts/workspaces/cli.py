@@ -34,6 +34,7 @@ from workspaces.git import (
 )
 from workspaces.issues import (
     ISSUE_DONE_STATUSES,
+    sandcastle_issue_meta,
 )
 from workspaces.ledger import WorkspaceLedger
 
@@ -974,12 +975,13 @@ def print_issue_row(issue, *, sandcastle=False):
     meta = issue["meta"]
     blockers = ",".join(str(item) for item in meta.get("blockedBy") or []) or "-"
     if sandcastle:
+        sc = sandcastle_issue_meta(meta)
         print(
             f"{str(meta.get('id', ''))[:16]:16} "
-            f"{str(meta.get('type', ''))[:4]:4} "
+            f"{str(sc.get('type', ''))[:4]:4} "
             f"{str(meta.get('status', ''))[:12]:12} "
             f"{blockers[:18]:18} "
-            f"{str(meta.get('reviewStatus', ''))[:12]:12} "
+            f"{str(sc.get('reviewStatus', ''))[:12]:12} "
             f"{meta.get('title', '')}"
         )
     else:
@@ -1030,7 +1032,7 @@ def cmd_issue_list(args):
         issues = [
             issue
             for issue in issues
-            if str(issue["meta"].get("type", "")).upper() == issue_type
+            if sandcastle_issue_meta(issue["meta"])["type"] == issue_type
         ]
     if not args.all:
         issues = [
@@ -1065,7 +1067,7 @@ def cmd_issue_ready(args):
                     "path": str(issue["path"]),
                     **(
                         {
-                            "type": issue["meta"].get("type") or "AFK",
+                            "type": sandcastle_issue_meta(issue["meta"])["type"],
                         }
                         if sandcastle
                         else {}
