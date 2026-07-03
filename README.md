@@ -124,31 +124,6 @@ scripts/workspace.py issue ready BILL-456 --json
 scripts/workspace.py issue set-status BILL-456 1 merged
 ```
 
-Sandcastle/AFK runner commands use the opt-in entrypoint:
-
-```bash
-scripts/workspace_with_sandcastle.py sandcastle BILL-456
-scripts/workspace_with_sandcastle.py sandcastle BILL-456 --json
-```
-
-Scaffold a repo-local Sandcastle runner:
-
-```bash
-scripts/workspace_with_sandcastle.py sandcastle BILL-456 --init-runner
-```
-
-Execute a repo-local Sandcastle runner with the plan path in the environment:
-
-```bash
-scripts/workspace_with_sandcastle.py sandcastle BILL-456 --execute --command "npx tsx .sandcastle/main.mts"
-```
-
-Reconcile a Sandcastle result file:
-
-```bash
-scripts/workspace_with_sandcastle.py sandcastle BILL-456 --reconcile-result ~/workspaces/_ledger/workspaces/BILL-456/runs/sandcastle-result-20260618-120000-000000.json
-```
-
 Plan cleanup for completed workspaces:
 
 ```bash
@@ -206,6 +181,8 @@ scripts/self_check.py
 ## Principles
 
 - The ledger is canonical.
+- The default workflow is manual or subagent-driven development through `workspace.py`.
+- For explicit Sandcastle, AFK, or runner-based execution, use `/workspaces-with-sandcastle` and `workspace_with_sandcastle.py`.
 - Creation captures the request and defaults to `captured`; it does not imply planning is complete.
 - Runtime metadata is plain files.
 - `spec.md` is mutable.

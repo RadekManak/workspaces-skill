@@ -7,6 +7,8 @@ description: Manage local AI-assisted development workspaces with a plain-file l
 
 Use this skill to keep a local workspace ledger up to date while doing development work.
 
+The default path is manual or subagent-driven development. For explicit Sandcastle, AFK, or runner-based execution requests, load `/workspaces-with-sandcastle` directly.
+
 ## Layout
 
 - Skill/tooling repo: this skill directory
@@ -72,14 +74,10 @@ scripts/workspace.py repo adopt <id> <path> [--name <name>]
 scripts/workspace.py repo refresh <id> [repo]
 scripts/workspace.py repo remove <id> <repo> [--delete-worktree]
 scripts/workspace.py issue create <id> <issue-id> --title "<title>"
-scripts/workspace.py issue list <id> [--all] [--status <status>] [--type AFK|HITL]
+scripts/workspace.py issue list <id> [--all] [--status <status>]
 scripts/workspace.py issue ready <id> [--json]
 scripts/workspace.py issue show <id> <issue-id>
 scripts/workspace.py issue set-status <id> <issue-id> <status>
-scripts/workspace.py sandcastle <id> [--repo <repo>] [--json]
-scripts/workspace.py sandcastle <id> --init-runner [--force]
-scripts/workspace.py sandcastle <id> --execute --command "<repo-local command>"
-scripts/workspace.py sandcastle <id> --reconcile-result <result.json>
 scripts/workspace.py cleanup-plan <id> [<id> ...] [--json] [--write]
 scripts/workspace.py cleanup-plan --all --write
 scripts/workspace.py cleanup <id> [<id> ...] [--force]
@@ -113,7 +111,16 @@ Adopt updates the generated VS Code workspace file to include the adopted repo p
 
 ### Open
 
-Use `open <id>` to launch the generated `.code-workspace` using `editor_command` from config. Use `open <id> --print` when an agent needs the path without launching an editor.
+Use `open <id>` to launch the generated `.code-workspace` using `editor_command` from config. Use `open <id> --print` to print the current `.code-workspace` JSON without launching an editor.
+
+`open` is a human-triggered convenience for launching an editor. Agents must not use it as their default way of switching session roots.
+
+### Session root switching
+
+When a command changes workspace folder topology (`create`, `adopt`, `repo add`, `repo adopt`, `repo remove`, `doctor --fix`), it prints the full current `.code-workspace` JSON as a final block in stdout. To switch the agent's own session root into the workspace, read that JSON's `folders[].path` entries and use those directories as the new roots — never the `.code-workspace` file path itself. Each `folders[].path` is relative to the `.code-workspace` file's own directory (`workspace_root/<workspace-id>/`); resolve it against that directory to get an absolute path before using it as a session root. Expect a possible error from this action and ignore it as long as the resulting roots are actually active.
+
+- `create`: if the agent is already active in a workspace, ask the user whether to switch; if the agent is not currently in any workspace, switch automatically after creation.
+- `adopt`, `repo add`, `repo adopt`, `repo remove`, and `doctor --fix`: always switch immediately without asking.
 
 ### Doctor
 
@@ -135,69 +142,17 @@ When the task is scoped enough for an agent to start without re-asking basics, s
 
 ### Issues
 
-Local workspace issues live in `issues/*.md` under the workspace ledger. They are the execution contract for Sandcastle-style AFK work and do not need to be GitHub issues.
+Local workspace issues live in `issues/*.md` under the workspace ledger. They are the execution contract for implementation work and do not need to be GitHub issues.
 
-Use `issue create` to write issues with YAML frontmatter. Each issue tracks an id, title, `AFK` or `HITL` type, status, blockers, deterministic Sandcastle branch, and review status.
+Use `issue create` to write issues with YAML frontmatter. Each issue tracks an id, title, status, blockers (`blocked-by`), branch, acceptance criteria, and body.
 
-Use `issue ready` to find dependency-ready work. It reports:
+Use `issue ready` to find dependency-ready work whose blockers are satisfied.
 
-- ready AFK issues that Sandcastle can run
-- ready HITL issues that require user input
+Use `issue ready --json` when another script needs structured input.
 
-Use `issue ready --json` when another script or runner needs structured input.
+Mark completed issue branches with `issue set-status <id> <issue-id> merged`. Do not delete child branches or worktrees automatically; cleanup is user-triggered later.
 
-Mark merged Sandcastle child branches with `issue set-status <id> <issue-id> merged`. Do not delete child branches or worktrees automatically; cleanup is user-triggered later.
-
-### Sandcastle
-
-Use `sandcastle <id>` to prepare a run plan from dependency-ready AFK issues. The command writes a JSON artifact under `runs/` and reports ready AFK and HITL counts.
-
-Use `sandcastle <id> --json` when another script needs the full plan payload.
-
-Use `sandcastle <id> --init-runner` to scaffold `.sandcastle/main.mts`, `implement-prompt.md`, and `review-prompt.md` into the selected repo worktree. Pass `--force` to overwrite existing generated files.
-
-Use `sandcastle <id> --execute --command "<repo-local command>"` to run a repo-local Sandcastle entrypoint. The command runs from the selected repo worktree and receives:
-
-```text
-WORKSPACE_ID
-WORKSPACE_LEDGER_DIR
-WORKSPACE_SANDCASTLE_PLAN
-WORKSPACE_SANDCASTLE_RESULT
-WORKSPACE_REPO_NAME
-WORKSPACE_REPO_PATH
-```
-
-The repo-local runner should write `WORKSPACE_SANDCASTLE_RESULT` as JSON:
-
-```json
-{
-  "issues": [
-    {
-      "id": "1",
-      "status": "merged",
-      "reviewStatus": "approved",
-      "commits": [{ "sha": "abc123" }],
-      "cleanupStatus": "pending"
-    }
-  ]
-}
-```
-
-Use `sandcastle <id> --reconcile-result <result.json>` to apply a result manually. Reconciliation updates issue frontmatter, appends notes, and moves the workspace to `user-review` when every local issue is complete.
-
-The generated runner uses a bounded loop for each issue:
-
-```text
-implementer -> reviewer -> implementer fixes reviewer feedback -> reviewer
-```
-
-Approved issue branches are merged back into the workspace task branch serially after the parallel implement/review pipelines finish. This avoids concurrent writes to the task branch.
-
-Only one Sandcastle execution may run per workspace at a time. The helper writes `runs/active-sandcastle-run.json` while `sandcastle --execute` is active and refuses overlapping executions.
-
-If an approved child branch cannot merge into the workspace task branch, mark the issue `blocked-hitl` with `reviewStatus: approved`, preserve the child branch, and record the merge error. Do not treat merge conflicts as generic runner failures.
-
-The first version supports one repo automatically. If the workspace has multiple repos, pass `--repo <repo>`.
+`workspace.py` may encounter issues or workspace state enriched by `workspace_with_sandcastle.py` (a `sandcastle:` block on an issue, or a `sandcastle:` section in `workspace.yaml`). This is normal, not drift or corruption. Base commands preserve that data unchanged without interpreting it.
 
 ### Cleanup
 
@@ -209,16 +164,16 @@ Use `cleanup-plan --all --write` for bulk cleanup review. It writes an auditable
 
 Only run `cleanup <workspace-id>` or `cleanup --from-plan <plan.json> <workspace-id>` after the user explicitly approves that workspace. Workspace cleanup removes clean linked worktrees under the configured workspace root, removes the workspace root including the generated `.code-workspace` file, keeps the ledger, and marks the workspace closed with `cleanupStatus: done`.
 
-Workspace cleanup refuses unsafe workspaces: active states, dirty repos, non-linked git checkouts, worktrees outside the workspace root, unexpected files in the workspace root, open PR snapshots, or an active Sandcastle run. `cleanup-plan` reports `force-eligible` when only soft blockers remain (dirty repos, extra files, open PR snapshots, or non-done state). Use `cleanup <workspace-id> --force` to remove those workspaces anyway. Force cleanup auto-closes the ledger, keeps task branches on source repos, records `cleanupAction: force-removed`, and appends a detailed note about what was overridden. `--force` cannot be used with `--from-plan` or `--item`.
+Workspace cleanup refuses unsafe workspaces: active states, dirty repos, non-linked git checkouts, worktrees outside the workspace root, unexpected files in the workspace root, open PR snapshots, or an active Sandcastle execution lock. `cleanup-plan` reports `force-eligible` when only soft blockers remain (dirty repos, extra files, open PR snapshots, or non-done state). Use `cleanup <workspace-id> --force` to remove those workspaces anyway. Force cleanup auto-closes the ledger, keeps task branches on source repos, records `cleanupAction: force-removed`, and appends a detailed note about what was overridden. `--force` cannot be used with `--from-plan` or `--item`.
 
-Per-issue branch cleanup remains available for Sandcastle child branches, but it is not the normal cleanup path. Use `cleanup-plan <workspace-id> --issues` to inspect completed issues with `cleanupStatus: pending`, then `cleanup --item <workspace-id>:<issue-id>` for approved issue-level cleanup.
+Per-issue branch cleanup remains available for completed issue branches, but it is not the normal cleanup path. Use `cleanup-plan <workspace-id> --issues` to inspect completed issues with `cleanupStatus: pending`, then `cleanup --item <workspace-id>:<issue-id>` for approved issue-level cleanup.
 
 Issue cleanup refuses unsafe items. It only handles:
 
 - `safe-to-delete`: branch is merged into the task branch and any child worktree is clean.
 - `mark-done`: branch and child worktree are already gone.
 
-Issue cleanup must not delete the workspace task branch and must not touch failed, needs-fix, blocked-HITL, unmerged, or dirty work.
+Issue cleanup must not delete the workspace task branch and must not touch failed, needs-fix, blocked-hitl, unmerged, or dirty work.
 
 ### Status
 
@@ -266,9 +221,9 @@ Classify every actionable item into one of three outcomes:
 
 For `direct-fix`, implement the fix on the workspace task branch, run relevant checks, append a note, and leave the workspace in `review-feedback` until the PR is updated.
 
-For `workspace-issue`, create local issues with `issue create`. Use `AFK` for feedback an agent can handle independently and `HITL` for feedback needing the user. Preserve links or short references back to the original PR comment in the issue body. After issue creation, Sandcastle can run the ready AFK subset again.
+For `workspace-issue`, create local issues with `issue create`. Preserve links or short references back to the original PR comment in the issue body. Use `issue ready` to find dependency-ready follow-up work.
 
-For `HITL`, do not guess. Create or update a HITL issue, set or keep the workspace state as `review-feedback`, and ask the user for the missing decision.
+For `HITL`, do not guess. Create or update a local issue when useful, set or keep the workspace state as `review-feedback`, and ask the user for the missing decision.
 
 After intake, always append a note with:
 
@@ -322,7 +277,7 @@ State meanings:
 - `needs-clarification`: creation or scoping found a critical missing input or contradiction.
 - `scoped`: task is clear enough to implement without re-asking basics.
 - `in-progress`: implementation work has started.
-- `user-review`: local work is ready for the user to inspect before publishing or PR review.
+- `user-review`: implementation work is ready for the user to inspect; this does not mean branch-level review or approval is already complete.
 - `pr-review`: PR is open and waiting on reviewers, CI, or external review.
 - `review-feedback`: PR has actionable reviewer comments or requested changes.
 - `dev-complete`: implementation is accepted or merged, but workspace is not closed.
