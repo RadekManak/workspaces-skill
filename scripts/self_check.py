@@ -18,8 +18,11 @@ WORKSPACE = ROOT / "scripts" / "workspace.py"
 WORKSPACE_SANDCASTLE = ROOT / "scripts" / "workspace_with_sandcastle.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from workspaces import doctor
+from workspaces.common import DEFAULT_CONFIG
 from workspaces.git import branch_exists
 from workspaces.issues import sandcastle_issue_meta
+from workspaces.ledger import WorkspaceLedger
 from workspaces.sandcastle_execute import dependency_mounts_for_issue
 from workspaces.workspace_model import Workspace
 
@@ -3040,6 +3043,102 @@ def test_workspace_model_mark_cleanup_done():
         raise AssertionError(f"Expected mark_cleanup_done to close and mark done, got {workspace.to_dict()}")
 
 
+def _doctor_test_config(tmp_dir):
+    config = dict(DEFAULT_CONFIG)
+    config["source_root"] = str(tmp_dir / "src")
+    config["workspace_root"] = str(tmp_dir / "workspaces")
+    config["ledger_root"] = str(tmp_dir / "ledger")
+    return config
+
+
+def test_doctor_check_workspace_fixes_missing_dirs_and_files():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("DOC-UNIT", title="Doctor unit test")
+
+        shutil.rmtree(ledger.runs_dir("DOC-UNIT"))
+        (ledger.ledger_dir("DOC-UNIT") / "spec.md").unlink()
+
+        issues = doctor.check_workspace(config, workspace, fix=False)
+        codes = {issue["code"] for issue in issues}
+        if "missing-dir" not in codes or "missing-file" not in codes:
+            raise AssertionError(f"Expected missing-dir and missing-file issues, got {issues}")
+        if any(issue.get("fixed") for issue in issues):
+            raise AssertionError(f"Expected fix=False to leave issues unfixed, got {issues}")
+        if ledger.runs_dir("DOC-UNIT").exists():
+            raise AssertionError("Expected fix=False to not create the missing directory")
+
+        fixed_issues = doctor.check_workspace(config, workspace, fix=True)
+        fixed_codes = {issue["code"] for issue in fixed_issues if issue.get("fixed")}
+        if "missing-dir" not in fixed_codes or "missing-file" not in fixed_codes:
+            raise AssertionError(f"Expected fix=True to repair missing dir/file issues, got {fixed_issues}")
+        if not ledger.runs_dir("DOC-UNIT").exists():
+            raise AssertionError("Expected fix=True to recreate the missing runs directory")
+        if not (ledger.ledger_dir("DOC-UNIT") / "spec.md").exists():
+            raise AssertionError("Expected fix=True to recreate the missing spec.md")
+
+        clean_issues = doctor.check_workspace(config, workspace, fix=False)
+        if any(issue["code"] in ("missing-dir", "missing-file") for issue in clean_issues):
+            raise AssertionError(f"Expected no missing-dir/file issues after fixing, got {clean_issues}")
+
+
+def test_doctor_check_workspace_detects_repo_branch_drift():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        repo_path = tmp_dir / "repo"
+        repo_path.mkdir(parents=True)
+        run(["git", "-C", str(repo_path), "init", "-b", "main"])
+        run(["git", "-C", str(repo_path), "config", "user.email", "test@example.com"])
+        run(["git", "-C", str(repo_path), "config", "user.name", "Test User"])
+        (repo_path / "README.md").write_text("hello\n", encoding="utf-8")
+        run(["git", "-C", str(repo_path), "add", "README.md"])
+        run(["git", "-C", str(repo_path), "commit", "-m", "init"])
+        run(["git", "-C", str(repo_path), "checkout", "-b", "feature"])
+
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("DOC-DRIFT", title="Doctor drift test")
+        workspace.upsert_repo({"name": "repo", "worktreePath": str(repo_path), "branch": "main"})
+        ledger.save(workspace)
+
+        issues = doctor.check_workspace(config, workspace, fix=False)
+        drift_issues = [issue for issue in issues if issue["code"] == "repo-branch-drift"]
+        if not drift_issues:
+            raise AssertionError(f"Expected repo-branch-drift issue, got {issues}")
+        if drift_issues[0].get("fixable"):
+            raise AssertionError(f"Expected repo-branch-drift to be reported as not fixable, got {drift_issues[0]}")
+
+
+def test_doctor_check_workspace_saves_unconditionally_on_fix():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("DOC-SAVE", title="Doctor save test")
+
+        # Fix everything ensure() itself doesn't set up (e.g. the workspace pointer)
+        # so the next pass is genuinely clean.
+        doctor.check_workspace(config, workspace, fix=True)
+        clean_issues = doctor.check_workspace(config, workspace, fix=False)
+        if clean_issues:
+            raise AssertionError(f"Expected a fixed-up workspace to be clean, got {clean_issues}")
+
+        yaml_path = ledger.workspace_yaml_path("DOC-SAVE")
+        before = yaml_path.read_text(encoding="utf-8")
+        time.sleep(1.1)  # updatedAt has second resolution
+        no_op_issues = doctor.check_workspace(config, workspace, fix=True)
+        if no_op_issues:
+            raise AssertionError(f"Expected no issues on a clean workspace, got {no_op_issues}")
+        after = yaml_path.read_text(encoding="utf-8")
+        if before == after:
+            raise AssertionError(
+                "Expected fix=True to unconditionally persist the workspace via "
+                "WorkspaceLedger.save even when no issues were found"
+            )
+
+
 WORKSPACE_MODEL_TESTS = [
     test_workspace_model_state_roundtrip,
     test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
@@ -3049,6 +3148,9 @@ WORKSPACE_MODEL_TESTS = [
     test_workspace_model_sandcastle_plan_pointer_lifecycle,
     test_workspace_model_to_dict_is_a_read_only_deep_copy,
     test_workspace_model_mark_cleanup_done,
+    test_doctor_check_workspace_fixes_missing_dirs_and_files,
+    test_doctor_check_workspace_detects_repo_branch_drift,
+    test_doctor_check_workspace_saves_unconditionally_on_fix,
 ]
 
 
