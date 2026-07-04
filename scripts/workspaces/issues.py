@@ -93,6 +93,32 @@ def sandcastle_issue_meta(meta):
     }
 
 
+def resolve_issue_repo(meta, all_repos):
+    """Return the workspace repo name an issue belongs to, if known.
+
+    `all_repos` must be the FULL workspace repo list, never a scope-filtered
+    subset (e.g. from `--repo`) — the single-repo-workspace default and the
+    "known repo names" check are both defined relative to the whole
+    workspace, independent of what a given planning invocation is scoped to.
+    """
+    explicit = meta.get("repo")
+    names = {str(repo.get("name") or "") for repo in all_repos}
+    if explicit is not None:
+        name = str(explicit)
+        if name in names:
+            return name
+        return None
+    if len(all_repos) == 1:
+        return all_repos[0].get("name")
+    return None
+
+
+def default_issue_repo(repos):
+    if len(repos) == 1:
+        return repos[0].get("name")
+    return None
+
+
 def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=False):
     if sandcastle:
         meta = normalize_legacy_sandcastle_fields(meta)
@@ -193,10 +219,10 @@ def ready_issues(ledger, workspace_id, *, sandcastle=False):
     return ready, blocked_hitl
 
 
-def issue_payload(issue):
+def issue_payload(issue, *, repo=None):
     meta = issue["meta"]
     sandcastle = sandcastle_issue_meta(meta)
-    return {
+    payload = {
         "id": meta.get("id"),
         "title": meta.get("title"),
         "type": sandcastle["type"],
@@ -207,6 +233,11 @@ def issue_payload(issue):
         "path": str(issue["path"]),
         "body": issue["body"].strip(),
     }
+    if repo is not None:
+        payload["repo"] = repo
+    elif meta.get("repo") is not None:
+        payload["repo"] = meta.get("repo")
+    return payload
 
 
 def set_issue_status(

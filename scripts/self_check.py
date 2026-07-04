@@ -296,7 +296,7 @@ def test_issue_graph_and_user_review(tmp, workspace_cli):
     assert_contains(status, "State: user-review")
 
 
-def test_sandcastle_plan_execute_reconcile_and_runner(tmp, workspace_cli):
+def test_sandcastle_plan_init_runner_and_reconcile(tmp, workspace_cli):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, workspace_cli)
     make_source_repo(tmp, "repo")
@@ -308,87 +308,312 @@ def test_sandcastle_plan_execute_reconcile_and_runner(tmp, workspace_cli):
         env=env,
     )
 
-    plan = json.loads(run([str(workspace_cli), "sandcastle", "TASK-4", "--json"], env=env).stdout)
-    if [issue["id"] for issue in plan["issues"]] != ["1"]:
-        raise AssertionError(f"Unexpected plan issues: {plan}")
-    if [issue["id"] for issue in plan["hitl"]] != ["2"]:
-        raise AssertionError(f"Unexpected HITL issues: {plan}")
-    assert_path(plan["planPath"])
-    assert_path(Path(plan["resultPath"]).parent)
+    plan_result = run(
+        [str(workspace_cli), "sandcastle", "plan", "TASK-4", "--json"],
+        env=env,
+    )
+    plan = parse_final_stdout_json(plan_result.stdout)
+    if plan["targetedIssueIds"] != ["1"]:
+        raise AssertionError(f"Unexpected targeted issues: {plan}")
+    if plan["issuesByRepo"]["repo"]["readyButNotTargeted"][0]["id"] != "2":
+        raise AssertionError(f"Unexpected HITL bucket: {plan}")
+    wave = plan["execution"]["waves"][0]["issues"]
+    if wave[0]["id"] != "1" or wave[0]["repo"] != "repo":
+        raise AssertionError(f"Unexpected execution wave: {wave}")
+    plan_path = Path(
+        read_yaml(tmp / "ledger" / "workspaces" / "TASK-4" / "workspace.yaml")["sandcastle"][
+            "currentPlan"
+        ]["path"]
+    )
+    assert_path(plan_path)
 
-    run([str(workspace_cli), "sandcastle", "TASK-4", "--init-runner"], env=env)
+    workspace_yaml = read_yaml(tmp / "ledger" / "workspaces" / "TASK-4" / "workspace.yaml")
+    current = workspace_yaml.get("sandcastle", {}).get("currentPlan") or {}
+    if current.get("path") != str(plan_path):
+        raise AssertionError(f"Expected current-plan pointer, got {workspace_yaml}")
+    if current.get("targetedIssueIds") != ["1"]:
+        raise AssertionError(f"Unexpected pointer targetedIssueIds: {current}")
+    if not str(current.get("fingerprint", "")).startswith("sha256:"):
+        raise AssertionError(f"Expected fingerprint on pointer, got {current}")
+
+    notes = (tmp / "ledger" / "workspaces" / "TASK-4" / "notes.md").read_text(encoding="utf-8")
+    assert_contains(notes, str(plan_path))
+    assert_contains(notes, "repo")
+
+    issue1 = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-4" / "issues" / "1.md")
+    sc1 = issue1.get("sandcastle") or {}
+    if sc1.get("type") != "AFK":
+        raise AssertionError(f"Expected lazy sandcastle block on targeted issue 1, got {issue1}")
+    if issue1.get("repo") != "repo":
+        raise AssertionError(f"Expected default repo on issue 1, got {issue1}")
+
+    run([str(workspace_cli), "sandcastle", "init-runner", "TASK-4"], env=env)
     scaffold = tmp / "workspaces" / "TASK-4" / "repo" / ".sandcastle"
     assert_path(scaffold / "main.mts")
     assert_path(scaffold / "implement-prompt.md")
     assert_path(scaffold / "review-prompt.md")
     repeat = run(
-        [str(workspace_cli), "sandcastle", "TASK-4", "--init-runner"],
+        [str(workspace_cli), "sandcastle", "init-runner", "TASK-4"],
         env=env,
         check=False,
     )
     if repeat.returncode == 0:
         raise AssertionError("Expected init-runner to refuse overwrite")
-    run([str(workspace_cli), "sandcastle", "TASK-4", "--init-runner", "--force"], env=env)
+    run([str(workspace_cli), "sandcastle", "init-runner", "TASK-4", "--force"], env=env)
 
-    command = (
-        "python3 - <<'PY'\n"
-        "import json, os\n"
-        "with open(os.environ['WORKSPACE_SANDCASTLE_RESULT'], 'w', encoding='utf-8') as f:\n"
-        "    json.dump({'issues':[{'id':'1','status':'merged','reviewStatus':'approved','cleanupStatus':'pending','commits':[{'sha':'abc123'}]}]}, f)\n"
-        "PY"
+    result_path = tmp / "manual-result.json"
+    result_path.write_text(
+        json.dumps({"issues": [{"id": "1", "status": "merged", "reviewStatus": "approved"}]}),
+        encoding="utf-8",
     )
-    run([str(workspace_cli), "sandcastle", "TASK-4", "--execute", "--command", command], env=env)
+    run(
+        [str(workspace_cli), "sandcastle", "reconcile-result", "TASK-4", str(result_path)],
+        env=env,
+    )
     issue = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-4" / "issues" / "1.md")
     sc = issue.get("sandcastle") or {}
     if issue["status"] != "merged" or sc.get("reviewStatus") != "approved":
         raise AssertionError(f"Expected reconciled issue, got {issue}")
-    assert_contains(run([str(workspace_cli), "status", "TASK-4"], env=env).stdout, "ready HITL: 1")
 
-    result_path = tmp / "manual-result.json"
-    result_path.write_text(
-        json.dumps({"issues": [{"id": "2", "status": "done", "reviewStatus": "approved"}]}),
-        encoding="utf-8",
+
+def test_sandcastle_plan_multi_repo_cross_dependency(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "frontend")
+    make_source_repo(tmp, "backend")
+    run(
+        [str(workspace_cli), "create", "CROSS", "--title", "Cross repo", "--repo", "frontend"],
+        env=env,
     )
-    run([str(workspace_cli), "sandcastle", "TASK-4", "--reconcile-result", str(result_path)], env=env)
-    assert_contains(run([str(workspace_cli), "status", "TASK-4"], env=env).stdout, "State: user-review")
+    run([str(workspace_cli), "repo", "add", "CROSS", "backend"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "CROSS",
+            "fe-1",
+            "--title",
+            "Frontend first",
+            "--repo",
+            "frontend",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "CROSS",
+            "be-1",
+            "--title",
+            "Backend after frontend",
+            "--repo",
+            "backend",
+            "--blocked-by",
+            "fe-1",
+        ],
+        env=env,
+    )
+
+    plan = parse_final_stdout_json(
+        run([str(workspace_cli), "sandcastle", "plan", "CROSS", "--json"], env=env).stdout
+    )
+    if plan["targetedIssueIds"] != ["be-1", "fe-1"]:
+        raise AssertionError(
+            f"Expected both issues in execution scope, got {plan['targetedIssueIds']}"
+        )
+    blocked = plan["issuesByRepo"]["backend"]["blocked"]
+    if len(blocked) != 1 or blocked[0]["issue"]["id"] != "be-1":
+        raise AssertionError(f"Expected backend issue in blocked bucket, got {blocked}")
+    assert_contains(blocked[0]["reason"], "fe-1")
+    waves = plan["execution"]["waves"]
+    if len(waves) != 2:
+        raise AssertionError(f"Expected two execution waves, got {waves}")
+    if waves[0]["issues"][0]["id"] != "fe-1" or waves[0]["issues"][0]["repo"] != "frontend":
+        raise AssertionError(f"Expected wave 0 frontend fe-1, got {waves[0]}")
+    if waves[1]["issues"][0]["id"] != "be-1" or waves[1]["issues"][0]["repo"] != "backend":
+        raise AssertionError(f"Expected wave 1 backend be-1, got {waves[1]}")
+    if waves[1]["issues"][0]["dependsOn"] != ["fe-1"]:
+        raise AssertionError(f"Expected be-1 to depend on fe-1, got {waves[1]}")
+
+    run([str(workspace_cli), "issue", "set-status", "CROSS", "fe-1", "merged"], env=env)
+    replan = parse_final_stdout_json(
+        run([str(workspace_cli), "sandcastle", "plan", "CROSS", "--json"], env=env).stdout
+    )
+    if replan["targetedIssueIds"] != ["be-1"]:
+        raise AssertionError(f"Expected backend issue after frontend merged, got {replan['targetedIssueIds']}")
+    if replan["execution"]["waves"][0]["issues"][0]["repo"] != "backend":
+        raise AssertionError(f"Expected backend wave after replan, got {replan['execution']['waves']}")
 
 
-def test_sandcastle_failure_marks_failed(tmp, workspace_cli):
+def test_sandcastle_plan_limit_excludes_independently_ready_dependent(tmp, workspace_cli):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, workspace_cli)
     make_source_repo(tmp, "repo")
-    run([str(workspace_cli), "create", "TASK-5", "--title", "Failure", "--repo", "repo"], env=env)
-    run([str(workspace_cli), "issue", "create", "TASK-5", "1", "--title", "First"], env=env)
-    proc = run(
-        [str(workspace_cli), "sandcastle", "TASK-5", "--execute", "--command", "exit 7"],
+    run([str(workspace_cli), "create", "LIMIT", "--title", "Limit bound", "--repo", "repo"], env=env)
+    run([str(workspace_cli), "issue", "create", "LIMIT", "0", "--title", "Already done"], env=env)
+    run([str(workspace_cli), "issue", "set-status", "LIMIT", "0", "merged"], env=env)
+    # Both "1" and "2" are independently ready: their only blocker ("0") is
+    # already merged, so neither one's readiness depends on the other.
+    run(
+        [str(workspace_cli), "issue", "create", "LIMIT", "1", "--title", "First", "--blocked-by", "0"],
         env=env,
-        check=False,
     )
-    if proc.returncode != 7:
-        raise AssertionError(f"Expected exit 7, got {proc.returncode}")
-    issue = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-5" / "issues" / "1.md")
-    if issue["status"] != "failed":
-        raise AssertionError(f"Expected failed issue, got {issue}")
+    run(
+        [str(workspace_cli), "issue", "create", "LIMIT", "2", "--title", "Second", "--blocked-by", "0"],
+        env=env,
+    )
+
+    plan = parse_final_stdout_json(
+        run(
+            [str(workspace_cli), "sandcastle", "plan", "LIMIT", "--limit", "1", "--json"],
+            env=env,
+        ).stdout
+    )
+    if plan["targetedIssueIds"] != ["1"]:
+        raise AssertionError(
+            f"Expected --limit to bound execution scope to just issue 1, got {plan['targetedIssueIds']}"
+        )
+    if len(plan["execution"]["waves"]) != 1 or plan["execution"]["waves"][0]["issues"] != [
+        {"id": "1", "repo": "repo", "dependsOn": []}
+    ]:
+        raise AssertionError(f"Unexpected execution waves under --limit, got {plan['execution']['waves']}")
+    excluded = plan["issuesByRepo"]["repo"]["readyButNotTargeted"]
+    if not any(item["id"] == "2" and item.get("reason") == "excluded by --limit" for item in excluded):
+        raise AssertionError(f"Expected issue 2 excluded by --limit, got {excluded}")
 
 
-def test_sandcastle_lock_refuses_concurrent_execute(tmp, workspace_cli):
+def test_sandcastle_plan_repo_filter_does_not_mistarget_unset_repo_issue(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "frontend")
+    make_source_repo(tmp, "backend")
+    run(
+        [str(workspace_cli), "create", "SCOPE", "--title", "Repo filter", "--repo", "frontend"],
+        env=env,
+    )
+    run([str(workspace_cli), "repo", "add", "SCOPE", "backend"], env=env)
+    # No --repo given: on this multi-repo workspace the issue's repo stays
+    # genuinely ambiguous/unset.
+    run(
+        [str(workspace_cli), "issue", "create", "SCOPE", "unset-issue", "--title", "No repo set"],
+        env=env,
+    )
+    issue = read_frontmatter(tmp / "ledger" / "workspaces" / "SCOPE" / "issues" / "unset-issue.md")
+    if issue.get("repo") is not None:
+        raise AssertionError(f"Expected no repo default on multi-repo workspace, got {issue}")
+
+    plan = parse_final_stdout_json(
+        run(
+            [str(workspace_cli), "sandcastle", "plan", "SCOPE", "--repo", "frontend", "--json"],
+            env=env,
+        ).stdout
+    )
+    if "unset-issue" in plan["targetedIssueIds"]:
+        raise AssertionError(
+            f"--repo frontend must not mistarget the repo-unset issue, got {plan['targetedIssueIds']}"
+        )
+    frontend_bucket = plan["issuesByRepo"]["frontend"]
+    if any(
+        item.get("id") == "unset-issue" or item.get("issue", {}).get("id") == "unset-issue"
+        for bucket in frontend_bucket.values()
+        for item in bucket
+    ):
+        raise AssertionError(f"Repo-unset issue must not appear under frontend, got {frontend_bucket}")
+    unspecified = plan["issuesByRepo"].get("(unspecified)", {}).get("blocked", [])
+    if not any(item["issue"]["id"] == "unset-issue" for item in unspecified):
+        raise AssertionError(f"Expected repo-unset issue in (unspecified) bucket, got {plan['issuesByRepo']}")
+    entry = next(item for item in unspecified if item["issue"]["id"] == "unset-issue")
+    assert_contains(entry["reason"], "repo not specified")
+
+
+def test_sandcastle_plan_unknown_repo_blocked(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo-a")
+    make_source_repo(tmp, "repo-b")
+    run(
+        [str(workspace_cli), "create", "UNK", "--title", "Unknown repo", "--repo", "repo-a"],
+        env=env,
+    )
+    run([str(workspace_cli), "repo", "add", "UNK", "repo-b"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "UNK",
+            "orphan",
+            "--title",
+            "Points at removed repo",
+            "--repo",
+            "repo-a",
+        ],
+        env=env,
+    )
+    run([str(workspace_cli), "repo", "remove", "UNK", "repo-a"], env=env)
+    plan = parse_final_stdout_json(
+        run([str(workspace_cli), "sandcastle", "plan", "UNK", "--json"], env=env).stdout
+    )
+    if plan["targetedIssueIds"]:
+        raise AssertionError(f"Expected no targeted issues, got {plan}")
+    blocked = plan["issuesByRepo"].get("repo-a", {}).get("blocked", [])
+    if len(blocked) != 1 or blocked[0]["issue"]["id"] != "orphan":
+        raise AssertionError(f"Expected orphan issue in repo-a blocked bucket, got {plan['issuesByRepo']}")
+    assert_contains(blocked[0]["reason"], "unknown repo")
+    assert_contains(blocked[0]["reason"], "repo-a")
+
+
+def test_issue_create_default_repo_single_repo_workspace(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, WORKSPACE)
+    make_source_repo(tmp, "only-repo")
+    run(
+        [str(WORKSPACE), "create", "ONE-REPO", "--title", "Single repo", "--repo", "only-repo"],
+        env=env,
+    )
+    run(
+        [str(WORKSPACE), "issue", "create", "ONE-REPO", "1", "--title", "Default repo"],
+        env=env,
+    )
+    issue = read_frontmatter(tmp / "ledger" / "workspaces" / "ONE-REPO" / "issues" / "1.md")
+    if issue.get("repo") != "only-repo":
+        raise AssertionError(f"Expected default repo on single-repo workspace, got {issue}")
+
+
+def test_sandcastle_plan_empty_still_writes_artifact(tmp, workspace_cli):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, workspace_cli)
     make_source_repo(tmp, "repo")
-    run([str(workspace_cli), "create", "TASK-LOCK", "--title", "Lock", "--repo", "repo"], env=env)
-    run([str(workspace_cli), "issue", "create", "TASK-LOCK", "1", "--title", "First"], env=env)
-    lock = tmp / "ledger" / "workspaces" / "TASK-LOCK" / "runs" / "active-sandcastle-run.json"
-    lock.write_text(json.dumps({"pid": 123, "createdAt": "test"}), encoding="utf-8")
-    proc = run(
-        [str(workspace_cli), "sandcastle", "TASK-LOCK", "--execute", "--command", "true"],
-        env=env,
-        check=False,
+    run([str(workspace_cli), "create", "EMPTY", "--title", "Empty plan", "--repo", "repo"], env=env)
+    plan = parse_final_stdout_json(
+        run([str(workspace_cli), "sandcastle", "plan", "EMPTY", "--json"], env=env).stdout
     )
-    if proc.returncode == 0:
-        raise AssertionError("Expected active Sandcastle lock to refuse execution")
-    issue = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-LOCK" / "issues" / "1.md")
-    if issue["status"] != "planned":
-        raise AssertionError(f"Expected locked issue to remain planned, got {issue}")
+    if plan["targetedIssueIds"]:
+        raise AssertionError(f"Expected empty targeted set, got {plan}")
+    workspace_yaml = read_yaml(tmp / "ledger" / "workspaces" / "EMPTY" / "workspace.yaml")
+    assert_path(workspace_yaml["sandcastle"]["currentPlan"]["path"])
+
+
+def test_base_preserves_workspace_sandcastle_section(tmp):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, WORKSPACE_SANDCASTLE)
+    make_source_repo(tmp, "repo")
+    run([str(WORKSPACE_SANDCASTLE), "create", "WS-SC", "--title", "Workspace sandcastle", "--repo", "repo"], env=env)
+    run([str(WORKSPACE_SANDCASTLE), "sandcastle", "plan", "WS-SC", "--json"], env=env)
+    before = read_yaml(tmp / "ledger" / "workspaces" / "WS-SC" / "workspace.yaml")
+    sandcastle_before = before.get("sandcastle")
+    if not sandcastle_before:
+        raise AssertionError(f"Expected sandcastle section after plan, got {before}")
+    run([str(WORKSPACE), "issue", "create", "WS-SC", "note-issue", "--title", "Trigger save"], env=env)
+    after = read_yaml(tmp / "ledger" / "workspaces" / "WS-SC" / "workspace.yaml")
+    if after.get("sandcastle") != sandcastle_before:
+        raise AssertionError(
+            f"Base entrypoint should preserve workspace sandcastle section, "
+            f"before={sandcastle_before!r} after={after.get('sandcastle')!r}"
+        )
 
 
 def test_cleanup_plan_and_execution(tmp, workspace_cli):
@@ -424,7 +649,7 @@ def test_cleanup_plan_and_execution(tmp, workspace_cli):
         ),
         encoding="utf-8",
     )
-    run([str(workspace_cli), "sandcastle", "TASK-6", "--reconcile-result", str(result_path)], env=env)
+    run([str(workspace_cli), "sandcastle", "reconcile-result", "TASK-6", str(result_path)], env=env)
 
     plan = json.loads(
         run([str(workspace_cli), "cleanup-plan", "TASK-6", "--issues", "--json"], env=env).stdout
@@ -1148,9 +1373,12 @@ BASE_TESTS = [
 ]
 
 SANDCASTLE_TESTS = [
-    test_sandcastle_plan_execute_reconcile_and_runner,
-    test_sandcastle_failure_marks_failed,
-    test_sandcastle_lock_refuses_concurrent_execute,
+    test_sandcastle_plan_init_runner_and_reconcile,
+    test_sandcastle_plan_multi_repo_cross_dependency,
+    test_sandcastle_plan_limit_excludes_independently_ready_dependent,
+    test_sandcastle_plan_repo_filter_does_not_mistarget_unset_repo_issue,
+    test_sandcastle_plan_unknown_repo_blocked,
+    test_sandcastle_plan_empty_still_writes_artifact,
     test_cleanup_plan_and_execution,
 ]
 
@@ -1158,6 +1386,7 @@ CLI_SPLIT_TESTS = [
     test_cli_split_help_and_restrictions,
     test_topology_commands_print_vscode_json,
     test_base_issue_create_omits_sandcastle_fields,
+    test_issue_create_default_repo_single_repo_workspace,
     test_open_identical_between_entrypoints,
     test_cross_entrypoint_issue_compat,
     test_sandcastle_issue_create_writes_nested_block,
@@ -1166,6 +1395,7 @@ CLI_SPLIT_TESTS = [
     test_legacy_fields_normalized_on_sandcastle_write,
     test_base_does_not_migrate_legacy_fields,
     test_mixed_state_sandcastle_block_preserved_and_idempotent,
+    test_base_preserves_workspace_sandcastle_section,
 ]
 
 

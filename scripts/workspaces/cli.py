@@ -34,8 +34,10 @@ from workspaces.git import (
 )
 from workspaces.issues import (
     ISSUE_DONE_STATUSES,
+    default_issue_repo,
     sandcastle_issue_meta,
 )
+from workspaces.sandcastle_plan import plan_workspace, select_plan_repos
 from workspaces.ledger import WorkspaceLedger
 
 
@@ -188,68 +190,76 @@ def select_repo(data, repo_name=None):
     return repos[0]
 
 
-def issue_payload(issue):
-    return issue_model.issue_payload(issue)
+def print_sandcastle_plan_summary(view):
+    for repo_name in sorted(view["byRepo"]):
+        bucket = view["byRepo"][repo_name]
+        print(f"Repo `{repo_name}`:")
+        print(f"  targeted: {len(bucket['targeted'])}")
+        for issue in bucket["targeted"]:
+            print(f"    - {issue['id']}: {issue['title']}")
+        print(f"  ready-but-not-targeted: {len(bucket['readyButNotTargeted'])}")
+        for issue in bucket["readyButNotTargeted"]:
+            reason = issue.get("reason") or issue.get("type", "")
+            print(f"    - {issue['id']}: {issue['title']} ({reason})")
+        print(f"  blocked/not-ready: {len(bucket['blocked'])}")
+        for item in bucket["blocked"]:
+            issue = item["issue"]
+            print(f"    - {issue['id']}: {issue['title']} ({item['reason']})")
+    print("Execution waves:")
+    for wave in view["waves"]:
+        ids = ", ".join(f"{item['repo']}:{item['id']}" for item in wave["issues"])
+        print(f"  wave {wave['wave']}: {ids or '(empty)'}")
 
 
-def write_sandcastle_plan(config, data, repo, ready, hitl, limit=None):
-    selected = ready[:limit] if limit else ready
-    workspace_id = data["id"]
-    created = now()
-    payload = {
-        "version": 1,
-        "createdAt": created,
-        "workspace": {
-            "id": workspace_id,
-            "title": data.get("title"),
-            "state": data.get("state"),
-            "ledgerDir": str(ledger_dir(config, workspace_id)),
-            "specPath": str(ledger_dir(config, workspace_id) / "spec.md"),
-        },
-        "repo": {
-            "name": repo.get("name"),
-            "worktreePath": repo.get("worktreePath"),
-            "branch": repo.get("branch"),
-            "remote": repo.get("remote"),
-        },
-        "issues": [issue_payload(issue) for issue in selected],
-        "hitl": [issue_payload(issue) for issue in hitl],
-    }
-    stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    path = runs_dir(config, workspace_id) / f"sandcastle-plan-{stamp}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return path, payload
+def cmd_sandcastle_plan(args):
+    config = load_config()
+    if args.limit is not None and args.limit < 1:
+        raise SystemExit("--limit must be greater than 0")
+    data = load_workspace(config, args.id)
+    repos = select_plan_repos(data, args.repo)
+    plan_path, payload, view = plan_workspace(
+        config,
+        data,
+        args.id,
+        repos,
+        limit=args.limit,
+    )
+    save_workspace(config, data)
+    targeted_ids = payload["targetedIssueIds"]
+    repo_names = payload["targetedRepos"]
+    append_note(
+        config,
+        args.id,
+        f"Sandcastle plan `{plan_path}` for repo(s) {', '.join(repo_names) or '(none)'} "
+        f"targeting issue(s) {', '.join(targeted_ids) or '(none)'}.",
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return
+    print(f"Wrote Sandcastle plan: {plan_path}")
+    print_sandcastle_plan_summary(view)
+    print(json.dumps(payload, indent=2))
 
 
-def sandcastle_lock_path(config, workspace_id):
-    return runs_dir(config, workspace_id) / "active-sandcastle-run.json"
+def cmd_sandcastle_init_runner(args):
+    config = load_config()
+    data = load_workspace(config, args.id)
+    repo = select_repo(data, args.repo)
+    written = init_sandcastle_runner(repo, force=args.force)
+    append_note(
+        config,
+        args.id,
+        f"Initialized Sandcastle runner in `{repo.get('worktreePath')}` with {len(written)} file(s).",
+    )
+    for path in written:
+        print(path)
 
 
-def acquire_sandcastle_lock(config, workspace_id, payload):
-    path = sandcastle_lock_path(config, workspace_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = {
-        "workspace": workspace_id,
-        "createdAt": now(),
-        "pid": os.getpid(),
-        "planPath": payload.get("planPath"),
-    }
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as error:
-        raise SystemExit(f"Sandcastle run already active: {path}") from error
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(lock, f, indent=2)
-        f.write("\n")
-    return path
-
-
-def release_sandcastle_lock(path):
-    try:
-        Path(path).unlink()
-    except FileNotFoundError:
-        pass
+def cmd_sandcastle_reconcile_result(args):
+    config = load_config()
+    load_workspace(config, args.id)
+    applied = apply_sandcastle_result(config, args.id, args.result_path)
+    print(f"Reconciled {len(applied)} issue update(s).")
 
 
 def set_issue_status(
@@ -1027,7 +1037,7 @@ def print_issue_row(issue, *, sandcastle=False):
 def cmd_issue_create(args):
     config = load_config()
     sandcastle = getattr(args, "sandcastle_mode", False)
-    load_workspace(config, args.workspace_id)
+    data = load_workspace(config, args.workspace_id)
     path = issue_path(config, args.workspace_id, args.issue_id)
     if path.exists() and not args.force:
         raise SystemExit(f"Issue already exists: {path}")
@@ -1041,6 +1051,12 @@ def cmd_issue_create(args):
         meta["type"] = args.type.upper()
     if args.branch:
         meta["branch"] = args.branch
+    if getattr(args, "repo", None):
+        meta["repo"] = args.repo
+    else:
+        default_repo = default_issue_repo(data.get("repos", []))
+        if default_repo:
+            meta["repo"] = default_repo
     body = issue_body_from_args(args)
     path, meta = write_issue(
         config, args.workspace_id, args.issue_id, meta, body, sandcastle=sandcastle
@@ -1171,138 +1187,6 @@ def cmd_issue_set_status(args):
     append_note(config, args.workspace_id, note)
     maybe_mark_user_review(config, args.workspace_id)
     print(str(path))
-
-
-def cmd_sandcastle(args):
-    config = load_config()
-    if args.reconcile_result:
-        applied = apply_sandcastle_result(config, args.id, args.reconcile_result)
-        print(f"Reconciled {len(applied)} issue update(s).")
-        return
-
-    data = load_workspace(config, args.id)
-    if args.limit is not None and args.limit < 1:
-        raise SystemExit("--limit must be greater than 0")
-    repo = select_repo(data, args.repo)
-    if args.init_runner:
-        written = init_sandcastle_runner(repo, force=args.force)
-        append_note(
-            config,
-            args.id,
-            f"Initialized Sandcastle runner in `{repo.get('worktreePath')}` with {len(written)} file(s).",
-        )
-        for path in written:
-            print(path)
-        return
-    worktree = repo.get("worktreePath")
-    if not worktree or not Path(worktree).exists():
-        raise SystemExit(f"Repo worktree missing on disk: {worktree}")
-
-    ready, hitl = ready_issues(config, args.id, sandcastle=True)
-    plan_path, payload = write_sandcastle_plan(
-        config,
-        data,
-        repo,
-        ready,
-        hitl,
-        limit=args.limit,
-    )
-    result_path = plan_path.with_name(
-        plan_path.name.replace("sandcastle-plan-", "sandcastle-result-")
-    )
-
-    if args.json:
-        print(
-            json.dumps(
-                {**payload, "planPath": str(plan_path), "resultPath": str(result_path)},
-                indent=2,
-            )
-        )
-    else:
-        print(f"Wrote Sandcastle plan: {plan_path}")
-        print(f"Expected Sandcastle result: {result_path}")
-        print(f"Ready AFK issues: {len(payload['issues'])}")
-        print(f"Ready HITL issues: {len(payload['hitl'])}")
-        if payload["issues"]:
-            for issue in payload["issues"]:
-                print(f"- {issue['id']}: {issue['title']} -> {issue['branch']}")
-        elif payload["hitl"]:
-            print("No AFK issues are ready. Resolve HITL work before rerunning.")
-        else:
-            print("No dependency-ready issues found.")
-
-    append_note(
-        config,
-        args.id,
-        f"Prepared Sandcastle plan `{plan_path}` with {len(payload['issues'])} AFK issue(s) and {len(payload['hitl'])} HITL issue(s).",
-    )
-
-    if not args.execute:
-        return
-    if not args.command:
-        raise SystemExit("--execute requires --command")
-    if not payload["issues"]:
-        raise SystemExit("No ready AFK issues to execute.")
-
-    lock_path = acquire_sandcastle_lock(
-        config,
-        args.id,
-        {"planPath": str(plan_path), "issues": [issue["id"] for issue in payload["issues"]]},
-    )
-    try:
-        for issue in payload["issues"]:
-            set_issue_status(config, args.id, issue["id"], "running", sandcastle=True)
-        data = load_workspace(config, args.id)
-        data["state"] = "in-progress"
-        save_workspace(config, data)
-        append_note(config, args.id, f"Started Sandcastle command for plan `{plan_path}`.")
-
-        env = os.environ.copy()
-        env.update(
-            {
-                "WORKSPACE_ID": args.id,
-                "WORKSPACE_LEDGER_DIR": str(ledger_dir(config, args.id)),
-                "WORKSPACE_SANDCASTLE_PLAN": str(plan_path),
-                "WORKSPACE_SANDCASTLE_RESULT": str(result_path),
-                "WORKSPACE_REPO_NAME": str(repo.get("name") or ""),
-                "WORKSPACE_REPO_PATH": str(worktree),
-            }
-        )
-        proc = subprocess.run(
-            args.command,
-            cwd=worktree,
-            shell=True,
-            env=env,
-            check=False,
-        )
-        append_note(
-            config,
-            args.id,
-            f"Sandcastle command exited with code {proc.returncode} for plan `{plan_path}`.",
-        )
-        if result_path.exists():
-            apply_sandcastle_result(config, args.id, result_path)
-        elif proc.returncode != 0:
-            for issue in payload["issues"]:
-                set_issue_status(
-                    config,
-                    args.id,
-                    issue["id"],
-                    "failed",
-                    extra={"lastError": f"Sandcastle command exited with code {proc.returncode}"},
-                    sandcastle=True,
-                )
-            data = load_workspace(config, args.id)
-            save_workspace(config, data)
-            append_note(
-                config,
-                args.id,
-                f"Marked {len(payload['issues'])} issue(s) failed because no result file was written.",
-            )
-        if proc.returncode != 0:
-            raise SystemExit(proc.returncode)
-    finally:
-        release_sandcastle_lock(lock_path)
 
 
 def cmd_cleanup_plan(args):
@@ -1486,6 +1370,7 @@ def add_issue_subcommands(issue_sub, *, sandcastle=False):
     p.add_argument("--acceptance", action="append")
     p.add_argument("--body")
     p.add_argument("--branch")
+    p.add_argument("--repo", help="Workspace repo this issue targets")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_issue_create)
 
@@ -1649,17 +1534,29 @@ def build_parser(*, sandcastle=False, prog=None):
     p.set_defaults(func=cmd_cleanup)
 
     if sandcastle:
-        p = sub.add_parser("sandcastle")
+        sandcastle = sub.add_parser("sandcastle")
+        sandcastle_sub = sandcastle.add_subparsers(dest="sandcastle_command", required=True)
+
+        p = sandcastle_sub.add_parser("plan", help="Plan dependency-ordered Sandcastle execution")
+        p.add_argument("id")
+        p.add_argument("--repo", help="Limit planning to one workspace repo")
+        p.add_argument("--limit", type=int, help="Limit targeted AFK issues")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(func=cmd_sandcastle_plan)
+
+        p = sandcastle_sub.add_parser("init-runner", help="Install the Sandcastle runner scaffold")
         p.add_argument("id")
         p.add_argument("--repo")
-        p.add_argument("--limit", type=int)
-        p.add_argument("--json", action="store_true")
-        p.add_argument("--execute", action="store_true")
-        p.add_argument("--command")
-        p.add_argument("--reconcile-result")
-        p.add_argument("--init-runner", action="store_true")
         p.add_argument("--force", action="store_true")
-        p.set_defaults(func=cmd_sandcastle)
+        p.set_defaults(func=cmd_sandcastle_init_runner)
+
+        p = sandcastle_sub.add_parser(
+            "reconcile-result",
+            help="Apply a Sandcastle result file to workspace issues",
+        )
+        p.add_argument("id")
+        p.add_argument("result_path")
+        p.set_defaults(func=cmd_sandcastle_reconcile_result)
 
     issue = sub.add_parser("issue")
     issue_sub = issue.add_subparsers(dest="issue_command", required=True)
