@@ -23,7 +23,6 @@ from workspaces.common import (
     now,
     read_yaml,
     run,
-    slug,
     template,
 )
 from workspaces.git import (
@@ -65,27 +64,27 @@ def load_config():
     return config
 
 def ledger_dir(config, workspace_id):
-    return Path(config["ledger_root"]) / "workspaces" / workspace_id
+    return WorkspaceLedger(config).ledger_dir(workspace_id)
 
 
 def workspace_root_path(config, workspace_id):
-    return Path(config["workspace_root"]) / workspace_id
+    return WorkspaceLedger(config).workspace_root_path(workspace_id)
 
 
 def vscode_workspace_path(config, workspace_id):
-    return workspace_root_path(config, workspace_id) / f"{workspace_id}.code-workspace"
+    return WorkspaceLedger(config).vscode_workspace_path(workspace_id)
 
 
 def issues_dir(config, workspace_id):
-    return ledger_dir(config, workspace_id) / "issues"
+    return WorkspaceLedger(config).issues_dir(workspace_id)
 
 
 def issue_path(config, workspace_id, issue_id):
-    return issues_dir(config, workspace_id) / f"{slug(issue_id)}.md"
+    return WorkspaceLedger(config).issue_path(workspace_id, issue_id)
 
 
 def runs_dir(config, workspace_id):
-    return ledger_dir(config, workspace_id) / "runs"
+    return WorkspaceLedger(config).runs_dir(workspace_id)
 
 
 def load_workspace(config, workspace_id):
@@ -460,7 +459,7 @@ def workspace_cleanup_candidates(config, workspace_ids):
 
 
 def print_workspace_cleanup_plan(candidates):
-    cleanup_safety({}).print_workspace_plan(candidates)
+    CleanupSafety.print_workspace_plan(candidates)
 
 
 def write_cleanup_plan(config, candidates):
@@ -468,7 +467,7 @@ def write_cleanup_plan(config, candidates):
 
 
 def load_cleanup_plan(path):
-    return cleanup_safety({}).load_plan(path)
+    return CleanupSafety.load_plan(path)
 
 
 def validate_cleanup_plan_candidate(config, plan, workspace_id):
@@ -484,7 +483,7 @@ def cleanup_candidates(config, workspace_ids, repo_name=None):
 
 
 def print_cleanup_plan(candidates):
-    cleanup_safety({}).print_issue_plan(candidates)
+    CleanupSafety.print_issue_plan(candidates)
 
 
 def cleanup_item(config, item, repo_name=None):
@@ -792,7 +791,7 @@ def cmd_status(args):
             print(f"- {pr.get('repo')} {label} {pr.get('state', '')}")
     issues = iter_issues(config, workspace_id)
     if issues:
-        sandcastle = getattr(args, "sandcastle_mode", False)
+        sandcastle = args.sandcastle_mode
         ready, hitl = ready_issues(config, workspace_id, sandcastle=sandcastle)
         counts = {}
         for issue in issues:
@@ -1121,7 +1120,7 @@ def print_issue_row(issue, *, sandcastle=False):
 
 def cmd_issue_create(args):
     config = load_config()
-    sandcastle = getattr(args, "sandcastle_mode", False)
+    sandcastle = args.sandcastle_mode
     data = load_workspace(config, args.workspace_id)
     path = issue_path(config, args.workspace_id, args.issue_id)
     if path.exists() and not args.force:
@@ -1154,7 +1153,7 @@ def cmd_issue_create(args):
 
 def cmd_issue_list(args):
     config = load_config()
-    sandcastle = getattr(args, "sandcastle_mode", False)
+    sandcastle = args.sandcastle_mode
     load_workspace(config, args.workspace_id)
     issues = iter_issues(config, args.workspace_id)
     if args.status:
@@ -1185,7 +1184,7 @@ def cmd_issue_list(args):
 
 def cmd_issue_ready(args):
     config = load_config()
-    sandcastle = getattr(args, "sandcastle_mode", False)
+    sandcastle = args.sandcastle_mode
     load_workspace(config, args.workspace_id)
     ready, hitl = ready_issues(config, args.workspace_id, sandcastle=sandcastle)
     if args.json:
@@ -1255,7 +1254,7 @@ def cmd_issue_show(args):
 
 def cmd_issue_set_status(args):
     config = load_config()
-    sandcastle = getattr(args, "sandcastle_mode", False)
+    sandcastle = args.sandcastle_mode
     load_workspace(config, args.workspace_id)
     path, meta, old_status = set_issue_status(
         config,

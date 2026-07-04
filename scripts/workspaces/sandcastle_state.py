@@ -1,4 +1,5 @@
 """Shared Sandcastle workspace state: plan pointer and eager invalidation."""
+from .common import repo_identity_snapshot
 from .issues import sandcastle_issue_meta
 
 
@@ -44,19 +45,6 @@ def _sandcastle_meta_snapshot(meta):
     }
 
 
-def _repo_set_snapshot(repos):
-    return sorted(
-        [
-            {
-                "name": repo.get("name"),
-                "worktreePath": repo.get("worktreePath"),
-            }
-            for repo in repos or []
-        ],
-        key=lambda item: str(item.get("name") or ""),
-    )
-
-
 def maybe_invalidate_plan_for_issue_edit(ledger, workspace_id, issue_id, old_meta, new_meta):
     data = ledger.load(workspace_id)
     if issue_id not in targeted_issue_ids(data):
@@ -79,8 +67,8 @@ def maybe_invalidate_plan_for_issue_edit(ledger, workspace_id, issue_id, old_met
 def maybe_invalidate_plan_for_repo_change(ledger, workspace_id, old_data, new_data):
     if not current_plan(new_data):
         return False
-    old_repos = _repo_set_snapshot(old_data.get("repos"))
-    new_repos = _repo_set_snapshot(new_data.get("repos"))
+    old_repos = repo_identity_snapshot(old_data.get("repos"))
+    new_repos = repo_identity_snapshot(new_data.get("repos"))
     if old_repos == new_repos:
         return False
     return invalidate_current_plan(

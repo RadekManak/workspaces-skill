@@ -1,4 +1,5 @@
 import datetime as dt
+import json
 import os
 import re
 import subprocess
@@ -56,6 +57,38 @@ def write_yaml(path, data):
 def read_yaml(path):
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def repo_projection(repo, *fields):
+    """Project a repo dict down to a plan/runner-safe subset of fields."""
+    return {field: repo.get(field) for field in fields}
+
+
+def repo_identity_snapshot(repos):
+    """Comparable snapshot of a repo list's identity (name + worktree path).
+
+    Used to detect whether "the set of repos" changed for Sandcastle plan
+    staleness/invalidation checks, independent of other repo fields.
+    """
+    return sorted(
+        [
+            {
+                "name": repo.get("name"),
+                "worktreePath": repo.get("worktreePath"),
+            }
+            for repo in repos or []
+        ],
+        key=lambda item: str(item.get("name") or ""),
+    )
 
 
 def slug(value):

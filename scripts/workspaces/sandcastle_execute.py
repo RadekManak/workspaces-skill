@@ -5,14 +5,15 @@ import os
 import subprocess
 from pathlib import Path
 
-from .issues import issue_index, issue_payload, resolve_issue_repo
+from .common import read_json, repo_projection, write_json
+from .issues import ISSUE_DONE_STATUSES, issue_index, issue_payload, resolve_issue_repo_or_raw
 from .ledger import WorkspaceLedger
 from .sandcastle_plan import planning_fingerprint
 from .sandcastle_state import clear_current_plan_pointer, current_plan
 
 
 FAILURE_STATUSES = {"failed", "blocked-hitl"}
-SKIP_FOR_EXECUTION = {"merged", "done", "skipped", "failed", "blocked-hitl"}
+SKIP_FOR_EXECUTION = ISSUE_DONE_STATUSES | FAILURE_STATUSES
 
 
 def _plan_artifact_paths(runs_dir):
@@ -25,7 +26,7 @@ def load_plan_payload(path, *, workspace_id):
     if not path.exists():
         raise SystemExit(f"Sandcastle plan not found: {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json(path)
     except json.JSONDecodeError as error:
         raise SystemExit(f"Invalid Sandcastle plan JSON: {path}") from error
     if payload.get("version") != 2:
@@ -58,10 +59,7 @@ def targeted_entries_for_plan(ledger, workspace_id, payload, all_repos):
                 "Run `sandcastle plan` again."
             )
         meta = issue["meta"]
-        repo = resolve_issue_repo(meta, all_repos)
-        if repo is None:
-            explicit = meta.get("repo")
-            repo = str(explicit) if explicit is not None else None
+        repo = resolve_issue_repo_or_raw(meta, all_repos)
         if repo is None:
             raise SystemExit(
                 f"Sandcastle plan is stale: targeted issue `{issue_id}` repo could not be resolved. "
@@ -184,10 +182,7 @@ def dependency_map(payload):
 
 def runner_repos(payload):
     return [
-        {
-            "name": repo.get("name"),
-            "worktreePath": repo.get("worktreePath"),
-        }
+        repo_projection(repo, "name", "worktreePath")
         for repo in payload.get("repos") or []
         if repo.get("name")
     ]
@@ -215,13 +210,9 @@ def resolve_issue_depends_on(ledger, workspace_id, issue_id, own_repo_name, all_
         blocker = index.get(blocker_id)
         if not blocker:
             continue
-        blocker_repo = resolve_issue_repo(blocker["meta"], all_repos)
-        if blocker_repo is None:
-            explicit = blocker["meta"].get("repo")
-            blocker_repo = str(explicit) if explicit is not None else None
+        blocker_repo = resolve_issue_repo_or_raw(blocker["meta"], all_repos)
         if blocker_repo is None:
             continue
-        blocker_repo = str(blocker_repo)
         if blocker_repo == own_repo:
             continue
         if blocker_repo in seen_repos:
@@ -305,11 +296,7 @@ def write_runner_plan(
             "specPath": workspace.get("specPath"),
         },
         "repos": runner_repos(payload),
-        "repo": {
-            "name": repo.get("name"),
-            "worktreePath": repo.get("worktreePath"),
-            "branch": repo.get("branch"),
-        },
+        "repo": repo_projection(repo, "name", "worktreePath", "branch"),
         "issues": [
             runner_issue_record(
                 ledger,
@@ -324,8 +311,7 @@ def write_runner_plan(
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
     plan_path = runs_dir / f"sandcastle-run-plan-w{wave_number}-{repo_name}-{stamp}.json"
     result_path = runs_dir / f"sandcastle-run-result-w{wave_number}-{repo_name}-{stamp}.json"
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(json.dumps(runner_plan, indent=2) + "\n", encoding="utf-8")
+    write_json(plan_path, runner_plan)
     return plan_path, result_path
 
 
@@ -437,7 +423,6 @@ def execute_plan(
             f"Started Sandcastle execute for plan `{plan_path}` targeting "
             f"{', '.join(targeted_ids) or '(none)'}.",
         )
-        data = load_workspace(workspace_id)
         data["state"] = "in-progress"
         save_workspace(data)
 
@@ -456,6 +441,7 @@ def execute_plan(
                 continue
 
             invocation = []
+            repos_by_name = repo_by_name(payload)
             for repo_name, issue_ids in sorted(grouped.items()):
                 # A launch-time failure for THIS repo (e.g. its worktree vanished from
                 # disk between planning and execute) must not abort the whole wave: any
@@ -477,7 +463,7 @@ def execute_plan(
                         ledger=ledger,
                         workspace_id=workspace_id,
                     )
-                    repo = repo_by_name(payload)[repo_name]
+                    repo = repos_by_name[repo_name]
                     worktree = repo.get("worktreePath")
                     if not worktree or not Path(worktree).exists():
                         raise SystemExit(f"Repo worktree missing on disk: {worktree}")
@@ -597,7 +583,7 @@ def execute_plan(
         if counts.get("failed") or counts.get("blocked-hitl"):
             outcome = "completed-with-failures"
         elif all(
-            index.get(issue_id, {}).get("meta", {}).get("status") in {"merged", "done", "skipped"}
+            index.get(issue_id, {}).get("meta", {}).get("status") in ISSUE_DONE_STATUSES
             for issue_id in targeted_ids
         ):
             outcome = "completed"

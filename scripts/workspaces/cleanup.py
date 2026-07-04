@@ -146,7 +146,8 @@ class CleanupSafety:
             candidate["reason"] = "workspace is done and worktrees are clean linked worktrees"
         return candidate
 
-    def print_workspace_plan(self, candidates):
+    @staticmethod
+    def print_workspace_plan(candidates):
         if not candidates:
             print("No workspace cleanup candidates found.")
             return
@@ -211,7 +212,8 @@ class CleanupSafety:
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return path, payload
 
-    def load_plan(self, path):
+    @staticmethod
+    def load_plan(path):
         plan_path = Path(path).expanduser()
         if not plan_path.exists():
             raise SystemExit(f"Cleanup plan not found: {plan_path}")
@@ -395,7 +397,8 @@ class CleanupSafety:
             candidates.append(candidate)
         return candidates
 
-    def print_issue_plan(self, candidates):
+    @staticmethod
+    def print_issue_plan(candidates):
         if not candidates:
             print("No cleanup candidates found.")
             return

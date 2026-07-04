@@ -2,9 +2,8 @@
 import datetime as dt
 import hashlib
 import json
-from pathlib import Path
 
-from .common import now
+from .common import now, repo_identity_snapshot, repo_projection, write_json
 from .issues import (
     ISSUE_ACTIVE_STATUSES,
     ISSUE_DONE_STATUSES,
@@ -134,16 +133,7 @@ def build_execution_waves(targeted_entries):
 
 def planning_fingerprint(repos, targeted_entries):
     """Hash the Sandcastle planning inputs that invalidate a locked plan."""
-    repo_part = sorted(
-        [
-            {
-                "name": repo.get("name"),
-                "worktreePath": repo.get("worktreePath"),
-            }
-            for repo in repos
-        ],
-        key=lambda item: str(item.get("name") or ""),
-    )
+    repo_part = repo_identity_snapshot(repos)
     issue_part = sorted(
         [
             {
@@ -309,15 +299,10 @@ def build_plan_view(ledger, workspace_id, all_repos, scope_repos, *, limit=None)
 
 
 def repo_record(repo):
-    return {
-        "name": repo.get("name"),
-        "worktreePath": repo.get("worktreePath"),
-        "branch": repo.get("branch"),
-        "remote": repo.get("remote"),
-    }
+    return repo_projection(repo, "name", "worktreePath", "branch", "remote")
 
 
-def write_plan_artifact(config, data, repos, view, *, ledger_dir, runs_dir):
+def write_plan_artifact(data, repos, view, *, ledger_dir, runs_dir):
     workspace_id = data["id"]
     created = now()
     targeted_by_repo = {}
@@ -348,8 +333,7 @@ def write_plan_artifact(config, data, repos, view, *, ledger_dir, runs_dir):
     }
     stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
     path = runs_dir / f"sandcastle-plan-{stamp}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    write_json(path, payload)
     return path, payload
 
 
@@ -397,10 +381,9 @@ def plan_workspace(config, data, workspace_id, repos, *, limit=None):
     all_repos = data.get("repos", [])
     view = build_plan_view(ledger, workspace_id, all_repos, repos, limit=limit)
     enrich_targeted_issues(ledger, workspace_id, view["targetedEntries"])
-    ledger_dir = Path(config["ledger_root"]) / "workspaces" / workspace_id
-    runs = ledger_dir / "runs"
+    ledger_dir = ledger.ledger_dir(workspace_id)
+    runs = ledger.runs_dir(workspace_id)
     plan_path, payload = write_plan_artifact(
-        config,
         data,
         repos,
         view,

@@ -532,46 +532,8 @@ def test_sandcastle_plan_init_runner_and_reconcile(tmp, workspace_cli):
 def test_sandcastle_plan_multi_repo_cross_dependency(tmp, workspace_cli):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, workspace_cli)
-    make_source_repo(tmp, "frontend")
-    make_source_repo(tmp, "backend")
-    run(
-        [str(workspace_cli), "create", "CROSS", "--title", "Cross repo", "--repo", "frontend"],
-        env=env,
-    )
-    run([str(workspace_cli), "repo", "add", "CROSS", "backend"], env=env)
-    run(
-        [
-            str(workspace_cli),
-            "issue",
-            "create",
-            "CROSS",
-            "fe-1",
-            "--title",
-            "Frontend first",
-            "--repo",
-            "frontend",
-        ],
-        env=env,
-    )
-    run(
-        [
-            str(workspace_cli),
-            "issue",
-            "create",
-            "CROSS",
-            "be-1",
-            "--title",
-            "Backend after frontend",
-            "--repo",
-            "backend",
-            "--blocked-by",
-            "fe-1",
-        ],
-        env=env,
-    )
-
     plan = parse_final_stdout_json(
-        run([str(workspace_cli), "sandcastle", "plan", "CROSS", "--json"], env=env).stdout
+        setup_cross_repo_execute_workspace(tmp, env, workspace_cli, name="CROSS").stdout
     )
     if plan["targetedIssueIds"] != ["be-1", "fe-1"]:
         raise AssertionError(
@@ -751,45 +713,14 @@ def test_sandcastle_plan_empty_still_writes_artifact(tmp, workspace_cli):
 
 
 def write_fake_sandcastle_command(tmp, log_path, *, fail_repos=None):
-    fail_repos = fail_repos or []
-    script = tmp / "fake_sandcastle_runner.py"
-    script.write_text(
-        "\n".join(
-            [
-                "import json",
-                "import os",
-                "import sys",
-                "from pathlib import Path",
-                "",
-                f"LOG = Path({str(log_path)!r})",
-                f"FAIL_REPOS = {fail_repos!r}",
-                "",
-                "plan_path = Path(os.environ['WORKSPACE_SANDCASTLE_PLAN'])",
-                "result_path = Path(os.environ['WORKSPACE_SANDCASTLE_RESULT'])",
-                "repo = os.environ['WORKSPACE_REPO_NAME']",
-                "plan = json.loads(plan_path.read_text(encoding='utf-8'))",
-                "issue_ids = [item['id'] for item in plan['issues']]",
-                "with LOG.open('a', encoding='utf-8') as handle:",
-                "    handle.write(f\"{repo}:{','.join(issue_ids)}\\n\")",
-                "if repo in FAIL_REPOS:",
-                "    sys.exit(1)",
-                "issues = [",
-                "    {",
-                "        'id': item['id'],",
-                "        'status': 'merged',",
-                "        'reviewStatus': 'approved',",
-                "        'branch': item['branch'],",
-                "    }",
-                "    for item in plan['issues']",
-                "]",
-                "result_path.write_text(json.dumps({'version': 1, 'issues': issues}) + '\\n', encoding='utf-8')",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+    """A `--command` runner that reports every issue merged/approved, except repos
+    in `fail_repos`, which exit 1 with no result file. A strict special case of
+    `write_scripted_sandcastle_command`'s "normal"/"fail" behaviors.
+    """
+    behaviors = {repo: "fail" for repo in (fail_repos or [])}
+    return write_scripted_sandcastle_command(
+        tmp, log_path, behaviors, script_name="fake_sandcastle_runner.py"
     )
-    script.chmod(0o755)
-    return f"python3 {script}"
 
 
 def write_scripted_sandcastle_command(tmp, log_path, behaviors=None, *, script_name="scripted_sandcastle_runner.py"):
@@ -885,20 +816,20 @@ def write_scripted_sandcastle_command(tmp, log_path, behaviors=None, *, script_n
     return f"python3 {script}"
 
 
-def setup_cross_repo_execute_workspace(tmp, env, workspace_cli):
+def setup_cross_repo_execute_workspace(tmp, env, workspace_cli, *, name="EXEC"):
     make_source_repo(tmp, "frontend")
     make_source_repo(tmp, "backend")
     run(
-        [str(workspace_cli), "create", "EXEC", "--title", "Execute", "--repo", "frontend"],
+        [str(workspace_cli), "create", name, "--title", "Execute", "--repo", "frontend"],
         env=env,
     )
-    run([str(workspace_cli), "repo", "add", "EXEC", "backend"], env=env)
+    run([str(workspace_cli), "repo", "add", name, "backend"], env=env)
     run(
         [
             str(workspace_cli),
             "issue",
             "create",
-            "EXEC",
+            name,
             "fe-1",
             "--title",
             "Frontend first",
@@ -912,7 +843,7 @@ def setup_cross_repo_execute_workspace(tmp, env, workspace_cli):
             str(workspace_cli),
             "issue",
             "create",
-            "EXEC",
+            name,
             "be-1",
             "--title",
             "Backend after frontend",
@@ -923,7 +854,7 @@ def setup_cross_repo_execute_workspace(tmp, env, workspace_cli):
         ],
         env=env,
     )
-    return run([str(workspace_cli), "sandcastle", "plan", "EXEC", "--json"], env=env)
+    return run([str(workspace_cli), "sandcastle", "plan", name, "--json"], env=env)
 
 
 def current_plan_pointer(tmp, workspace_id):

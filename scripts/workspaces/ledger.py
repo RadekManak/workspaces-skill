@@ -4,7 +4,8 @@ import json
 import os
 from pathlib import Path
 
-from .common import now, read_yaml, relative_or_absolute, slug, template, write_yaml
+from .common import now, read_json, read_yaml, relative_or_absolute, slug, template, write_json, write_yaml
+from .sandcastle_state import maybe_invalidate_plan_for_repo_change
 
 
 class WorkspaceLedger:
@@ -40,7 +41,7 @@ class WorkspaceLedger:
         if not lock_path.exists():
             return False
         try:
-            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock = read_json(lock_path)
         except json.JSONDecodeError:
             return False
         pid = lock.get("pid")
@@ -174,8 +175,6 @@ class WorkspaceLedger:
             data["vscodeWorkspacePath"] = str(self.write_vscode_workspace(data))
         write_yaml(path, data)
         if old_data is not None:
-            from .sandcastle_state import maybe_invalidate_plan_for_repo_change
-
             maybe_invalidate_plan_for_repo_change(self, workspace_id, old_data, data)
 
     def build_vscode_workspace(self, data):

@@ -113,6 +113,18 @@ def resolve_issue_repo(meta, all_repos):
     return None
 
 
+def resolve_issue_repo_or_raw(meta, all_repos):
+    """Like `resolve_issue_repo`, but fall back to a stale/unknown explicit `repo:`
+    value instead of dropping it, so a repo rename/removal is reported as staleness
+    against the *original* name rather than silently resolved to `None`.
+    """
+    repo = resolve_issue_repo(meta, all_repos)
+    if repo is not None:
+        return repo
+    explicit = meta.get("repo")
+    return str(explicit) if explicit is not None else None
+
+
 def default_issue_repo(repos):
     if len(repos) == 1:
         return repos[0].get("name")
