@@ -19,6 +19,7 @@ WORKSPACE_SANDCASTLE = ROOT / "scripts" / "workspace_with_sandcastle.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces.git import branch_exists
+from workspaces.issues import sandcastle_issue_meta
 from workspaces.sandcastle_execute import dependency_mounts_for_issue
 from workspaces.workspace_model import Workspace
 
@@ -495,8 +496,7 @@ def test_sandcastle_plan_init_runner_and_reconcile(tmp, workspace_cli):
     assert_contains(notes, "repo")
 
     issue1 = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-4" / "issues" / "1.md")
-    sc1 = issue1.get("sandcastle") or {}
-    if sc1.get("type") != "AFK":
+    if sandcastle_issue_meta(issue1)["type"] != "AFK":
         raise AssertionError(f"Expected lazy sandcastle block on targeted issue 1, got {issue1}")
     if issue1.get("repo") != "repo":
         raise AssertionError(f"Expected default repo on issue 1, got {issue1}")
@@ -525,8 +525,7 @@ def test_sandcastle_plan_init_runner_and_reconcile(tmp, workspace_cli):
         env=env,
     )
     issue = read_frontmatter(tmp / "ledger" / "workspaces" / "TASK-4" / "issues" / "1.md")
-    sc = issue.get("sandcastle") or {}
-    if issue["status"] != "merged" or sc.get("reviewStatus") != "approved":
+    if issue["status"] != "merged" or sandcastle_issue_meta(issue)["reviewStatus"] != "approved":
         raise AssertionError(f"Expected reconciled issue, got {issue}")
 
 
@@ -2715,8 +2714,7 @@ def test_cross_entrypoint_issue_compat(tmp):
     )
     run([str(WORKSPACE), "issue", "set-status", "XENT", "2", "ready"], env=env)
     issue2 = read_frontmatter(tmp / "ledger" / "workspaces" / "XENT" / "issues" / "2.md")
-    sc2 = issue2.get("sandcastle") or {}
-    if sc2.get("type") != "HITL":
+    if sandcastle_issue_meta(issue2)["type"] != "HITL":
         raise AssertionError(f"Expected base-entrypoint update to preserve sandcastle.type=HITL, got {issue2}")
     if issue2.get("status") != "ready":
         raise AssertionError(f"Expected status=ready after base update, got {issue2}")
@@ -2748,8 +2746,8 @@ def test_sandcastle_issue_create_writes_nested_block(tmp):
     issue = read_frontmatter(tmp / "ledger" / "workspaces" / "SC-CREATE" / "issues" / "1.md")
     if "type" in issue or "reviewStatus" in issue:
         raise AssertionError(f"Expected no top-level Sandcastle fields, got {issue}")
-    sc = issue.get("sandcastle") or {}
-    if sc.get("type") != "HITL" or sc.get("reviewStatus") != "pending":
+    sc = sandcastle_issue_meta(issue)
+    if sc["type"] != "HITL" or sc["reviewStatus"] != "pending":
         raise AssertionError(f"Expected nested sandcastle block, got {issue}")
 
 
@@ -2770,8 +2768,8 @@ def test_lazy_sandcastle_block_only_on_targeted_issue(tmp):
     run([str(WORKSPACE_SANDCASTLE), "issue", "ready", "LAZY", "--json"], env=env)
     issue1 = read_frontmatter(tmp / "ledger" / "workspaces" / "LAZY" / "issues" / "1.md")
     issue2 = read_frontmatter(tmp / "ledger" / "workspaces" / "LAZY" / "issues" / "2.md")
-    sc1 = issue1.get("sandcastle") or {}
-    if sc1.get("type") != "AFK" or sc1.get("reviewStatus") != "approved":
+    sc1 = sandcastle_issue_meta(issue1)
+    if sc1["type"] != "AFK" or sc1["reviewStatus"] != "approved":
         raise AssertionError(f"Expected sandcastle block on targeted issue 1, got {issue1}")
     if "sandcastle" in issue2:
         raise AssertionError(f"issue ready must not rewrite unrelated issue 2, got {issue2}")
@@ -2838,8 +2836,8 @@ def test_legacy_fields_normalized_on_sandcastle_write(tmp):
     issue = read_frontmatter(issue_path)
     if "type" in issue or "reviewStatus" in issue:
         raise AssertionError(f"Expected legacy top-level fields migrated away, got {issue}")
-    sc = issue.get("sandcastle") or {}
-    if sc.get("type") != "HITL" or sc.get("reviewStatus") != "pending":
+    sc = sandcastle_issue_meta(issue)
+    if sc["type"] != "HITL" or sc["reviewStatus"] != "pending":
         raise AssertionError(f"Expected legacy values nested unchanged, got {issue}")
 
 
@@ -2899,8 +2897,8 @@ def test_mixed_state_sandcastle_block_preserved_and_idempotent(tmp):
     issue = read_frontmatter(issue_path)
     if "type" in issue or "reviewStatus" in issue:
         raise AssertionError(f"Expected legacy top-level fields removed, got {issue}")
-    sc = issue.get("sandcastle") or {}
-    if sc.get("type") != "AFK" or sc.get("reviewStatus") != "approved":
+    sc = sandcastle_issue_meta(issue)
+    if sc["type"] != "AFK" or sc["reviewStatus"] != "approved":
         raise AssertionError(
             f"Expected stray legacy reviewStatus merged into block without being dropped, got {issue}"
         )
@@ -2934,8 +2932,7 @@ def test_mixed_state_sandcastle_block_preserved_and_idempotent(tmp):
     )
     run([str(WORKSPACE_SANDCASTLE), "issue", "set-status", "MIXED", "legacy-2", "ready"], env=env)
     conflict_issue = read_frontmatter(conflict_path)
-    conflict_sc = conflict_issue.get("sandcastle") or {}
-    if conflict_sc.get("reviewStatus") != "approved":
+    if sandcastle_issue_meta(conflict_issue)["reviewStatus"] != "approved":
         raise AssertionError(
             f"Expected existing nested block value to win over stray legacy value, got {conflict_issue}"
         )

@@ -12,6 +12,7 @@ from .issues import (
     issue_index,
     issue_payload,
     resolve_issue_repo,
+    sandcastle_block,
     sandcastle_issue_meta,
     write_issue,
 )
@@ -356,8 +357,7 @@ def enrich_targeted_issues(ledger, workspace_id, targeted_entries):
         if not issue:
             continue
         meta = dict(issue["meta"])
-        block = meta.get("sandcastle")
-        if isinstance(block, dict) and block.get("type"):
+        if sandcastle_block(meta).get("type"):
             continue
         write_issue(
             ledger,

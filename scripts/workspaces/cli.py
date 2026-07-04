@@ -1112,7 +1112,7 @@ def cmd_issue_create(args):
         "blockedBy": args.blocked_by or [],
     }
     if sandcastle:
-        meta["type"] = args.type.upper()
+        meta = issue_model.set_issue_type(meta, args.type.upper())
     if args.branch:
         meta["branch"] = args.branch
     if getattr(args, "repo", None):

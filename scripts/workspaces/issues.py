@@ -50,10 +50,27 @@ def issue_body_from_args(args):
     return "\n\n".join(part for part in parts if part).strip() + "\n"
 
 
-def _sandcastle_block(meta):
-    """Return meta's sandcastle block as a dict, treating a non-dict value as empty."""
+def sandcastle_block(meta):
+    """Return meta's nested sandcastle block as a dict, treating a non-dict value as empty.
+
+    This is the canonical accessor for the raw `sandcastle:` frontmatter block.
+    Callers outside this module should prefer `sandcastle_issue_meta` (read) or
+    `set_issue_type` (write) instead of reaching into `meta["sandcastle"]`
+    directly; use this only when the raw, un-defaulted block itself is needed.
+    """
     block = meta.get("sandcastle")
     return dict(block) if isinstance(block, dict) else {}
+
+
+def set_issue_type(meta, issue_type):
+    """Return a copy of `meta` with the nested sandcastle block's `type` set.
+
+    Canonical write-side accessor for the Sandcastle issue type: callers
+    should never set a legacy top-level `type` field directly.
+    """
+    meta = dict(meta)
+    meta["sandcastle"] = {**sandcastle_block(meta), "type": issue_type}
+    return meta
 
 
 def normalize_legacy_sandcastle_fields(meta):
@@ -65,7 +82,7 @@ def normalize_legacy_sandcastle_fields(meta):
     """
     result = dict(meta)
     had_block_key = "sandcastle" in result
-    block = _sandcastle_block(result)
+    block = sandcastle_block(result)
     if "type" in result:
         block.setdefault("type", result.pop("type"))
     if "reviewStatus" in result:
@@ -82,7 +99,7 @@ def sandcastle_issue_meta(meta):
     doesn't already define; the nested block always wins on conflict, mirroring
     the write-side merge policy in `normalize_legacy_sandcastle_fields`.
     """
-    block = _sandcastle_block(meta)
+    block = sandcastle_block(meta)
     if "type" not in block and "type" in meta:
         block["type"] = meta.get("type")
     if "reviewStatus" not in block and "reviewStatus" in meta:
@@ -150,7 +167,7 @@ def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=Fal
         "updatedAt": now(),
     }
     if sandcastle:
-        block = _sandcastle_block(meta)
+        block = sandcastle_block(meta)
         issue_type = str(block.get("type") or "AFK").upper()
         if issue_type not in ISSUE_TYPES:
             raise SystemExit(f"Invalid issue type for {issue_id}: {issue_type}")
@@ -283,7 +300,7 @@ def set_issue_status(
     meta["updatedAt"] = now()
     if sandcastle:
         meta = normalize_legacy_sandcastle_fields(meta)
-        block = _sandcastle_block(meta)
+        block = sandcastle_block(meta)
         if review_status:
             block["reviewStatus"] = review_status
         meta["sandcastle"] = block
