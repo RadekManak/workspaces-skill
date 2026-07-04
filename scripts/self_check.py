@@ -20,7 +20,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces import doctor
 from workspaces import github_sync
+from workspaces import issues as issue_model
 from workspaces import repo
+from workspaces import sandcastle_reconcile
 from workspaces.common import DEFAULT_CONFIG
 from workspaces.git import branch_exists
 from workspaces.issues import sandcastle_issue_meta
@@ -3273,6 +3275,126 @@ def test_github_sync_sync_prs_raises_when_gh_missing():
             github_sync.shutil.which = original_which
 
 
+def test_sandcastle_reconcile_apply_result_updates_issue_status_and_notes():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        ledger.ensure("SC-RECONCILE", title="Sandcastle reconcile test")
+        issue_model.write_issue(
+            ledger,
+            "SC-RECONCILE",
+            "1",
+            {"title": "Issue one"},
+            "## What to build\n\nTBD.\n",
+            sandcastle=True,
+        )
+
+        result_path = tmp_dir / "result.json"
+        result_path.write_text(
+            json.dumps({"issues": [{"id": "1", "status": "merged", "reviewStatus": "approved"}]}),
+            encoding="utf-8",
+        )
+
+        applied = sandcastle_reconcile.apply_sandcastle_result(config, "SC-RECONCILE", str(result_path))
+        if len(applied) != 1:
+            raise AssertionError(f"Expected exactly one applied update, got {applied}")
+
+        issue = issue_model.read_issue(ledger.issue_path("SC-RECONCILE", "1"))
+        if issue["meta"]["status"] != "merged":
+            raise AssertionError(f"Expected issue status 'merged', got {issue['meta']}")
+
+        notes = (tmp_dir / "ledger" / "workspaces" / "SC-RECONCILE" / "notes.md").read_text(encoding="utf-8")
+        assert_contains(notes, "Reconciled Sandcastle result")
+        assert_contains(notes, "status changed from")
+
+
+def test_sandcastle_reconcile_apply_result_isolates_bad_entries():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        ledger.ensure("SC-ISOLATE", title="Sandcastle isolate test")
+        issue_model.write_issue(
+            ledger,
+            "SC-ISOLATE",
+            "1",
+            {"title": "Issue one"},
+            "## What to build\n\nTBD.\n",
+            sandcastle=True,
+        )
+
+        result_path = tmp_dir / "result.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "issues": [
+                        {"status": "merged"},  # missing `id`
+                        {"id": "1", "status": "merged"},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        applied = sandcastle_reconcile.apply_sandcastle_result(config, "SC-ISOLATE", str(result_path))
+        if len(applied) != 1:
+            raise AssertionError(f"Expected the valid entry to still be applied, got {applied}")
+
+        issue = issue_model.read_issue(ledger.issue_path("SC-ISOLATE", "1"))
+        if issue["meta"]["status"] != "merged":
+            raise AssertionError(f"Expected the valid entry's issue to be updated, got {issue['meta']}")
+
+
+def test_sandcastle_reconcile_apply_result_raises_when_all_entries_fail():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        ledger.ensure("SC-ALLFAIL", title="Sandcastle all-fail test")
+
+        result_path = tmp_dir / "result.json"
+        result_path.write_text(
+            json.dumps({"issues": [{"status": "merged"}, {"id": "missing"}]}),
+            encoding="utf-8",
+        )
+
+        try:
+            sandcastle_reconcile.apply_sandcastle_result(config, "SC-ALLFAIL", str(result_path))
+            raise AssertionError("Expected apply_sandcastle_result to raise when every entry fails")
+        except SystemExit:
+            pass
+
+
+def test_sandcastle_reconcile_init_runner_writes_template_files():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        repo_path = tmp_dir / "repo"
+        repo_path.mkdir(parents=True)
+        repo_dict = {"worktreePath": str(repo_path)}
+
+        source = ROOT / "templates" / "sandcastle"
+        expected_names = {item.name for item in source.iterdir() if item.is_file()}
+
+        written = sandcastle_reconcile.init_sandcastle_runner(repo_dict)
+        written_names = {path.name for path in written}
+        if written_names != expected_names:
+            raise AssertionError(f"Expected written files {expected_names}, got {written_names}")
+        for name in expected_names:
+            if not (repo_path / ".sandcastle" / name).exists():
+                raise AssertionError(f"Expected {name} to be written under .sandcastle")
+
+        try:
+            sandcastle_reconcile.init_sandcastle_runner(repo_dict)
+            raise AssertionError("Expected init_sandcastle_runner to refuse to overwrite without --force")
+        except SystemExit:
+            pass
+
+        written_again = sandcastle_reconcile.init_sandcastle_runner(repo_dict, force=True)
+        if {path.name for path in written_again} != expected_names:
+            raise AssertionError(f"Expected force=True to rewrite all template files, got {written_again}")
+
+
 WORKSPACE_MODEL_TESTS = [
     test_workspace_model_state_roundtrip,
     test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
@@ -3290,6 +3412,10 @@ WORKSPACE_MODEL_TESTS = [
     test_repo_refresh_repo_updates_git_metadata,
     test_github_sync_apply_pr_event_maps_state_and_records_pr,
     test_github_sync_sync_prs_raises_when_gh_missing,
+    test_sandcastle_reconcile_apply_result_updates_issue_status_and_notes,
+    test_sandcastle_reconcile_apply_result_isolates_bad_entries,
+    test_sandcastle_reconcile_apply_result_raises_when_all_entries_fail,
+    test_sandcastle_reconcile_init_runner_writes_template_files,
 ]
 
 
