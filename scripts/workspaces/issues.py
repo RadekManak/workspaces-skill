@@ -309,12 +309,12 @@ def maybe_mark_user_review(ledger, workspace_id):
         return
     if any(issue["meta"].get("status") not in ISSUE_DONE_STATUSES for issue in issues):
         return
-    data = ledger.load(workspace_id)
-    if data.get("state") in {"closed", "dev-complete", "user-review"}:
+    workspace = ledger.load(workspace_id)
+    if workspace.state in {"closed", "dev-complete", "user-review"}:
         return
-    old_state = data.get("state")
-    data["state"] = "user-review"
-    ledger.save(data)
+    old_state = workspace.state
+    workspace.set_state("user-review")
+    ledger.save(workspace)
     ledger.append_note(
         workspace_id,
         f"State changed from `{old_state}` to `user-review` because all local issues are complete.",

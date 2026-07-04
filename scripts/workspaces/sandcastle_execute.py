@@ -9,7 +9,6 @@ from .common import read_json, repo_projection, write_json
 from .issues import ISSUE_DONE_STATUSES, issue_index, issue_payload, resolve_issue_repo_or_raw
 from .ledger import WorkspaceLedger
 from .sandcastle_plan import planning_fingerprint
-from .sandcastle_state import clear_current_plan_pointer, current_plan
 
 
 FAILURE_STATUSES = {"failed", "blocked-hitl"}
@@ -43,7 +42,7 @@ def load_plan_payload(path, *, workspace_id):
 def targeted_entries_for_plan(ledger, workspace_id, payload, all_repos):
     """Resolve the plan's targeted issues against `all_repos` (must be LIVE, current data).
 
-    `all_repos` must be the live workspace repo list (e.g. `data["repos"]`), never the
+    `all_repos` must be the live workspace repo list (e.g. `workspace.repos`), never the
     plan artifact's own frozen `repos` snapshot — otherwise a repo rename/removal after
     planning can never be detected as staleness, since the frozen list would always
     resolve issues the same way it did at plan time.
@@ -113,12 +112,12 @@ def _status_blind(entries):
     return blinded
 
 
-def plan_is_stale(ledger, workspace_id, data, payload):
+def plan_is_stale(ledger, workspace_id, workspace, payload):
     """Compare LIVE repo/issue state against the plan's DECLARED (frozen-at-plan-time)
     state, ignoring status-only drift.
 
-    `live_repos` comes from live `data` (e.g. `data["repos"]`), while `declared_repos` is
-    the plan artifact's own frozen `repos` snapshot -- comparing live-vs-live (or
+    `live_repos` comes from the live `workspace`, while `declared_repos` is the plan
+    artifact's own frozen `repos` snapshot -- comparing live-vs-live (or
     declared-vs-declared) on both sides would never detect a repo rename/removal, since
     it would trivially always match itself. Both sides are hashed with the same
     `planning_fingerprint()` used at plan time (reused, not reimplemented), but the
@@ -127,7 +126,7 @@ def plan_is_stale(ledger, workspace_id, data, payload):
     was computed with status included, so comparing directly against it would falsely
     flag ordinary status progression as staleness (see `_status_blind`).
     """
-    live_repos = data.get("repos") or []
+    live_repos = workspace.repos
     declared_repos = payload.get("repos") or []
     live_entries = targeted_entries_for_plan(ledger, workspace_id, payload, live_repos)
     declared_entries = _declared_targeted_entries(payload)
@@ -138,8 +137,8 @@ def plan_is_stale(ledger, workspace_id, data, payload):
     return live_fingerprint != declared_fingerprint
 
 
-def assert_plan_fresh(ledger, workspace_id, data, payload):
-    if plan_is_stale(ledger, workspace_id, data, payload):
+def assert_plan_fresh(ledger, workspace_id, workspace, payload):
+    if plan_is_stale(ledger, workspace_id, workspace, payload):
         raise SystemExit(
             "Sandcastle plan is stale: issue blockers, branches, Sandcastle metadata, "
             "repo scope, or targeted issue set no longer match the locked plan fingerprint. "
@@ -147,19 +146,19 @@ def assert_plan_fresh(ledger, workspace_id, data, payload):
         )
 
 
-def resolve_execution_plan(ledger, workspace_id, data, *, explicit_plan=None):
+def resolve_execution_plan(ledger, workspace_id, workspace, *, explicit_plan=None):
     runs_dir = ledger.runs_dir(workspace_id)
     if explicit_plan:
         plan_path = Path(explicit_plan).expanduser()
     else:
-        pointer = current_plan(data)
+        pointer = workspace.current_sandcastle_plan
         if pointer and pointer.get("path"):
             plan_path = Path(pointer["path"]).expanduser()
         else:
             plan_path = None
             for candidate in _plan_artifact_paths(runs_dir):
                 payload = load_plan_payload(candidate, workspace_id=workspace_id)
-                if not plan_is_stale(ledger, workspace_id, data, payload):
+                if not plan_is_stale(ledger, workspace_id, workspace, payload):
                     plan_path = candidate
                     break
             if plan_path is None:
@@ -167,7 +166,7 @@ def resolve_execution_plan(ledger, workspace_id, data, *, explicit_plan=None):
                     "No valid Sandcastle plan found. Run `sandcastle plan` first or pass `--plan <path>`."
                 )
     payload = load_plan_payload(plan_path, workspace_id=workspace_id)
-    assert_plan_fresh(ledger, workspace_id, data, payload)
+    assert_plan_fresh(ledger, workspace_id, workspace, payload)
     return plan_path, payload
 
 
@@ -392,7 +391,7 @@ def summarize_execution(targeted_ids, index):
 
 def execute_plan(
     config,
-    data,
+    workspace,
     workspace_id,
     plan_path,
     payload,
@@ -423,8 +422,8 @@ def execute_plan(
             f"Started Sandcastle execute for plan `{plan_path}` targeting "
             f"{', '.join(targeted_ids) or '(none)'}.",
         )
-        data["state"] = "in-progress"
-        save_workspace(data)
+        workspace.set_state("in-progress")
+        save_workspace(workspace)
 
         waves = (payload.get("execution") or {}).get("waves") or []
         for wave in waves:
@@ -599,9 +598,9 @@ def execute_plan(
         return result
     finally:
         ledger.release_sandcastle_lock(lock_path)
-        data = load_workspace(workspace_id)
-        clear_current_plan_pointer(data)
-        save_workspace(data)
+        workspace = load_workspace(workspace_id)
+        workspace.clear_current_sandcastle_plan()
+        save_workspace(workspace)
         if result is not None:
             append_note(workspace_id, format_execute_summary(result))
 

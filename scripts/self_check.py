@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces.git import branch_exists
 from workspaces.sandcastle_execute import dependency_mounts_for_issue
+from workspaces.workspace_model import Workspace
 
 
 def run(cmd, *, env=None, cwd=None, check=True, input=None):
@@ -2940,6 +2941,120 @@ def test_mixed_state_sandcastle_block_preserved_and_idempotent(tmp):
         )
 
 
+def test_workspace_model_state_roundtrip():
+    workspace = Workspace({"id": "w1", "state": "captured"})
+    if workspace.state != "captured":
+        raise AssertionError(f"Expected initial state 'captured', got {workspace.state!r}")
+    workspace.set_state("in-progress")
+    if workspace.state != "in-progress":
+        raise AssertionError(f"Expected state 'in-progress' after set_state, got {workspace.state!r}")
+
+
+def test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name():
+    workspace = Workspace({"id": "w1", "repos": []})
+    workspace.upsert_repo({"name": "app", "worktreePath": "/tmp/app", "branch": "main"})
+    workspace.upsert_repo({"name": "app", "worktreePath": "/tmp/app", "branch": "feature"})
+    if len(workspace.repos) != 1:
+        raise AssertionError(f"Expected dedup by name to keep one repo, got {workspace.repos}")
+    if workspace.repos[0]["branch"] != "feature":
+        raise AssertionError(f"Expected upsert to merge fields onto existing repo, got {workspace.repos[0]}")
+
+    workspace.upsert_repo({"name": "renamed", "worktreePath": "/tmp/app"})
+    if len(workspace.repos) != 1 or workspace.repos[0]["name"] != "renamed":
+        raise AssertionError(f"Expected dedup by worktreePath to merge even with a new name, got {workspace.repos}")
+
+    workspace.upsert_repo({"name": "other", "worktreePath": "/tmp/other"})
+    if len(workspace.repos) != 2:
+        raise AssertionError(f"Expected a genuinely new repo to be appended, got {workspace.repos}")
+
+
+def test_workspace_model_find_repo_missing_raises():
+    workspace = Workspace({"id": "w1", "repos": [{"name": "app"}]})
+    if workspace.find_repo("app")["name"] != "app":
+        raise AssertionError("Expected find_repo to return the matching repo")
+    try:
+        workspace.find_repo("missing")
+        raise AssertionError("Expected find_repo to raise SystemExit for an unknown repo")
+    except SystemExit:
+        pass
+
+
+def test_workspace_model_remove_and_replace_repo():
+    workspace = Workspace(
+        {"id": "w1", "repos": [{"name": "a", "branch": "main"}, {"name": "b", "branch": "main"}]}
+    )
+    removed = workspace.remove_repo("a")
+    if removed["name"] != "a" or [repo["name"] for repo in workspace.repos] != ["b"]:
+        raise AssertionError(f"Expected remove_repo to drop only `a`, got {workspace.repos}")
+
+    workspace.replace_repo("b", {"name": "b", "branch": "renamed"})
+    if workspace.repos[0]["branch"] != "renamed":
+        raise AssertionError(f"Expected replace_repo to update the entry in place, got {workspace.repos}")
+
+    workspace.replace_all_repos([{"name": "c"}, {"name": "d"}])
+    if [repo["name"] for repo in workspace.repos] != ["c", "d"]:
+        raise AssertionError(f"Expected replace_all_repos to replace the whole list, got {workspace.repos}")
+
+
+def test_workspace_model_github_pr_upsert_vs_append():
+    workspace = Workspace({"id": "w1"})
+    workspace.record_github_pr({"repo": "app", "branch": "feature", "number": 1, "state": "OPEN"})
+    workspace.record_github_pr({"repo": "app", "branch": "feature", "number": 1, "state": "MERGED"})
+    if len(workspace.github_prs) != 1 or workspace.github_prs[0]["state"] != "MERGED":
+        raise AssertionError(f"Expected matching (repo, branch) to update in place, got {workspace.github_prs}")
+
+    # No repo/branch on the item (e.g. a manual `workspace pr` event): never matches, always appends.
+    workspace.record_github_pr({"number": 2, "state": "OPEN"})
+    if len(workspace.github_prs) != 2:
+        raise AssertionError(f"Expected an unmatched PR item to be appended, got {workspace.github_prs}")
+
+
+def test_workspace_model_sandcastle_plan_pointer_lifecycle():
+    workspace = Workspace({"id": "w1"})
+    if workspace.current_sandcastle_plan is not None:
+        raise AssertionError("Expected no plan pointer on a fresh workspace")
+    if workspace.clear_current_sandcastle_plan():
+        raise AssertionError("Expected clearing an absent pointer to report no change")
+
+    workspace.set_current_sandcastle_plan({"path": "/tmp/plan.json", "targetedIssueIds": ["a", "b"]})
+    if workspace.targeted_issue_ids() != {"a", "b"}:
+        raise AssertionError(f"Expected targeted_issue_ids from the pointer, got {workspace.targeted_issue_ids()}")
+
+    changed = workspace.clear_current_sandcastle_plan()
+    if not changed or workspace.current_sandcastle_plan is not None:
+        raise AssertionError("Expected clear_current_sandcastle_plan to drop the pointer")
+    if "sandcastle" in workspace.to_dict():
+        raise AssertionError("Expected the empty sandcastle block to be dropped entirely, not left as {}")
+
+
+def test_workspace_model_to_dict_is_a_read_only_deep_copy():
+    workspace = Workspace({"id": "w1", "repos": [{"name": "app"}]})
+    snapshot = workspace.to_dict()
+    snapshot["repos"][0]["name"] = "mutated"
+    snapshot["id"] = "mutated"
+    if workspace.repos[0]["name"] != "app" or workspace.id != "w1":
+        raise AssertionError("Expected mutating a to_dict() snapshot to never affect the real Workspace")
+
+
+def test_workspace_model_mark_cleanup_done():
+    workspace = Workspace({"id": "w1", "state": "dev-complete"})
+    workspace.mark_cleanup_done(action="safe-to-remove", at="2026-01-01T00:00:00+00:00")
+    if workspace.state != "closed" or workspace.cleanup_status != "done":
+        raise AssertionError(f"Expected mark_cleanup_done to close and mark done, got {workspace.to_dict()}")
+
+
+WORKSPACE_MODEL_TESTS = [
+    test_workspace_model_state_roundtrip,
+    test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
+    test_workspace_model_find_repo_missing_raises,
+    test_workspace_model_remove_and_replace_repo,
+    test_workspace_model_github_pr_upsert_vs_append,
+    test_workspace_model_sandcastle_plan_pointer_lifecycle,
+    test_workspace_model_to_dict_is_a_read_only_deep_copy,
+    test_workspace_model_mark_cleanup_done,
+]
+
+
 BASE_TESTS = [
     test_config_and_ledger_workspace,
     test_worktree_adopt_status_note_close,
@@ -3012,6 +3127,11 @@ CLI_SPLIT_TESTS = [
 
 def main():
     passed = 0
+    for test in WORKSPACE_MODEL_TESTS:
+        test()
+        print(f"ok {test.__name__}")
+        passed += 1
+
     for test in BASE_TESTS:
         for workspace_cli in (WORKSPACE, WORKSPACE_SANDCASTLE):
             with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:

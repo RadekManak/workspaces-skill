@@ -95,19 +95,19 @@ def iter_workspaces(config):
     yield from WorkspaceLedger(config).iter_workspaces()
 
 
-def save_workspace(config, data):
-    WorkspaceLedger(config).save(data)
+def save_workspace(config, workspace):
+    WorkspaceLedger(config).save(workspace)
 
 
-def write_vscode_workspace(config, data):
-    return WorkspaceLedger(config).write_vscode_workspace(data)
+def write_vscode_workspace(config, workspace):
+    return WorkspaceLedger(config).write_vscode_workspace(workspace)
 
 
-def build_vscode_workspace(config, data):
-    return WorkspaceLedger(config).build_vscode_workspace(data)
+def build_vscode_workspace(config, workspace):
+    return WorkspaceLedger(config).build_vscode_workspace(workspace)
 
 
-def print_vscode_workspace_block(config, data):
+def print_vscode_workspace_block(config, workspace):
     """Append the current .code-workspace JSON as the final stdout block.
 
     Skipped once a workspace is cleanup-done, mirroring the guard in
@@ -117,11 +117,11 @@ def print_vscode_workspace_block(config, data):
     unconditionally would resurrect a stale .code-workspace file listing
     repos that no longer exist on disk.
     """
-    if data.get("cleanupStatus") == "done":
+    if workspace.cleanup_status == "done":
         return
-    path = vscode_workspace_path(config, data["id"])
+    path = vscode_workspace_path(config, workspace.id)
     if not path.exists():
-        path = write_vscode_workspace(config, data)
+        path = write_vscode_workspace(config, workspace)
     payload = json.loads(path.read_text(encoding="utf-8"))
     print(json.dumps(payload, indent=2))
 
@@ -172,13 +172,10 @@ def ready_issues(config, workspace_id, *, sandcastle=False):
     )
 
 
-def select_repo(data, repo_name=None):
-    repos = data.get("repos", [])
+def select_repo(workspace, repo_name=None):
+    repos = workspace.repos
     if repo_name:
-        for repo in repos:
-            if repo.get("name") == repo_name:
-                return repo
-        raise SystemExit(f"Repo not found in workspace: {repo_name}")
+        return workspace.find_repo(repo_name)
     if not repos:
         raise SystemExit("Workspace has no repos. Add or adopt one before running Sandcastle.")
     if len(repos) > 1:
@@ -212,16 +209,16 @@ def cmd_sandcastle_plan(args):
     config = load_config()
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be greater than 0")
-    data = load_workspace(config, args.id)
-    repos = select_plan_repos(data, args.repo)
+    workspace = load_workspace(config, args.id)
+    repos = select_plan_repos(workspace, args.repo)
     plan_path, payload, view = plan_workspace(
         config,
-        data,
+        workspace,
         args.id,
         repos,
         limit=args.limit,
     )
-    save_workspace(config, data)
+    save_workspace(config, workspace)
     targeted_ids = payload["targetedIssueIds"]
     repo_names = payload["targetedRepos"]
     append_note(
@@ -240,8 +237,8 @@ def cmd_sandcastle_plan(args):
 
 def cmd_sandcastle_init_runner(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    repo = select_repo(data, args.repo)
+    workspace = load_workspace(config, args.id)
+    repo = select_repo(workspace, args.repo)
     written = init_sandcastle_runner(repo, force=args.force)
     append_note(
         config,
@@ -264,12 +261,12 @@ def cmd_sandcastle_execute(args):
     if not args.command:
         raise SystemExit("--command is required")
     workspace_id = args.id
-    data = load_workspace(config, workspace_id)
+    workspace = load_workspace(config, workspace_id)
     ledger = WorkspaceLedger(config)
     plan_path, payload = resolve_execution_plan(
         ledger,
         workspace_id,
-        data,
+        workspace,
         explicit_plan=args.plan,
     )
 
@@ -295,15 +292,15 @@ def cmd_sandcastle_execute(args):
     def append_note_cb(ws_id, text):
         append_note(config, ws_id, text)
 
-    def save_workspace_cb(ws_data):
-        save_workspace(config, ws_data)
+    def save_workspace_cb(ws):
+        save_workspace(config, ws)
 
     def load_workspace_cb(ws_id):
         return load_workspace(config, ws_id)
 
     result = execute_plan(
         config,
-        data,
+        workspace,
         workspace_id,
         plan_path,
         payload,
@@ -397,8 +394,8 @@ def apply_sandcastle_result(config, workspace_id, result_path, *, skip_plan_inva
         except (Exception, SystemExit) as error:  # noqa: BLE001 - isolate per entry
             failures.append((index, update, error))
 
-    data = load_workspace(config, workspace_id)
-    save_workspace(config, data)
+    workspace = load_workspace(config, workspace_id)
+    save_workspace(config, workspace)
     summary = f"Reconciled Sandcastle result `{path}` with {len(applied)} issue update(s)"
     if failures:
         summary += f", {len(failures)} entr{'y' if len(failures) == 1 else 'ies'} failed to apply"
@@ -450,8 +447,8 @@ def cleanup_safety(config):
     return CleanupSafety(config, select_repo)
 
 
-def workspace_root_extra_paths(config, data):
-    return cleanup_safety(config).workspace_root_extra_paths(data)
+def workspace_root_extra_paths(config, workspace):
+    return cleanup_safety(config).workspace_root_extra_paths(workspace)
 
 
 def workspace_cleanup_candidates(config, workspace_ids):
@@ -488,15 +485,6 @@ def print_cleanup_plan(candidates):
 
 def cleanup_item(config, item, repo_name=None):
     return cleanup_safety(config).cleanup_item(item, repo_name=repo_name)
-
-
-def upsert_repo(data, repo):
-    repos = data.setdefault("repos", [])
-    for index, existing in enumerate(repos):
-        if existing.get("worktreePath") == repo.get("worktreePath") or existing.get("name") == repo.get("name"):
-            repos[index] = {**existing, **repo}
-            return
-    repos.append(repo)
 
 
 def infer_workspace_id(path, info):
@@ -556,8 +544,8 @@ def cmd_config(args):
     print(yaml.safe_dump(load_config(), sort_keys=False).strip())
 
 
-def add_source_repo_to_workspace(config, data, repo_name, branch=None):
-    workspace_id = data["id"]
+def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
+    workspace_id = workspace.id
     workspace_root = workspace_root_path(config, workspace_id)
     workspace_root.mkdir(parents=True, exist_ok=True)
     (workspace_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
@@ -581,8 +569,7 @@ def add_source_repo_to_workspace(config, data, repo_name, branch=None):
             capture=True,
         )
     info = git_info(dest, config)
-    upsert_repo(
-        data,
+    workspace.upsert_repo(
         {
             "name": repo_name,
             "sourcePath": str(source),
@@ -600,21 +587,20 @@ def add_source_repo_to_workspace(config, data, repo_name, branch=None):
 
 def cmd_create(args):
     config = load_config()
-    data = ensure_workspace(config, args.id, args.title, args.state, args.input)
+    workspace = ensure_workspace(config, args.id, args.title, args.state, args.input)
     for repo in args.repo or []:
-        add_source_repo_to_workspace(config, data, repo, branch=args.branch)
-    save_workspace(config, data)
+        add_source_repo_to_workspace(config, workspace, repo, branch=args.branch)
+    save_workspace(config, workspace)
     print(str(ledger_dir(config, args.id)))
-    print_vscode_workspace_block(config, data)
+    print_vscode_workspace_block(config, workspace)
 
 
 def cmd_adopt(args):
     config = load_config()
     info = git_info(args.path, config)
     workspace_id = args.id or infer_workspace_id(args.path, info)
-    data = ensure_workspace(config, workspace_id, args.title, "in-progress")
-    upsert_repo(
-        data,
+    workspace = ensure_workspace(config, workspace_id, args.title, "in-progress")
+    workspace.upsert_repo(
         {
             "name": args.name or Path(info["root"]).name,
             "worktreePath": info["root"],
@@ -626,26 +612,19 @@ def cmd_adopt(args):
             "forkRemote": info["forkRemote"],
         },
     )
-    save_workspace(config, data)
+    save_workspace(config, workspace)
     ws_root = workspace_root_path(config, workspace_id)
     ws_root.mkdir(parents=True, exist_ok=True)
     (ws_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
     append_note(config, workspace_id, f"Adopted worktree `{info['root']}` on branch `{info['branch']}`.")
     print(workspace_id)
-    print_vscode_workspace_block(config, data)
-
-
-def find_repo(data, repo_name):
-    for index, repo in enumerate(data.get("repos", [])):
-        if repo.get("name") == repo_name:
-            return index, repo
-    raise SystemExit(f"Repo not found in workspace: {repo_name}")
+    print_vscode_workspace_block(config, workspace)
 
 
 def cmd_repo_list(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    repos = data.get("repos", [])
+    workspace = load_workspace(config, args.id)
+    repos = workspace.repos
     if args.json:
         print(json.dumps({"repos": repos}, indent=2))
         return
@@ -659,20 +638,19 @@ def cmd_repo_list(args):
 
 def cmd_repo_add(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    dest = add_source_repo_to_workspace(config, data, args.repo, branch=args.branch)
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.id)
+    dest = add_source_repo_to_workspace(config, workspace, args.repo, branch=args.branch)
+    save_workspace(config, workspace)
     append_note(config, args.id, f"Added repo `{args.repo}` at `{dest}`.")
     print(dest)
-    print_vscode_workspace_block(config, data)
+    print_vscode_workspace_block(config, workspace)
 
 
 def cmd_repo_adopt(args):
     config = load_config()
-    data = load_workspace(config, args.id)
+    workspace = load_workspace(config, args.id)
     info = git_info(args.path, config)
-    upsert_repo(
-        data,
+    workspace.upsert_repo(
         {
             "name": args.name or Path(info["root"]).name,
             "worktreePath": info["root"],
@@ -684,34 +662,34 @@ def cmd_repo_adopt(args):
             "forkRemote": info["forkRemote"],
         },
     )
-    save_workspace(config, data)
+    save_workspace(config, workspace)
     append_note(config, args.id, f"Adopted repo `{info['root']}` on branch `{info['branch']}`.")
     print(info["root"])
-    print_vscode_workspace_block(config, data)
+    print_vscode_workspace_block(config, workspace)
 
 
-def remove_repo_worktree(config, data, repo):
+def remove_repo_worktree(config, workspace, repo):
     remove_linked_worktree(
         repo.get("worktreePath"),
-        workspace_root_path(config, data["id"]),
+        workspace_root_path(config, workspace.id),
         source_path=repo.get("sourcePath"),
     )
 
 
 def cmd_repo_remove(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    index, repo = find_repo(data, args.repo)
+    workspace = load_workspace(config, args.id)
+    repo = workspace.find_repo(args.repo)
     if args.delete_worktree:
-        remove_repo_worktree(config, data, repo)
-    data["repos"].pop(index)
-    save_workspace(config, data)
+        remove_repo_worktree(config, workspace, repo)
+    workspace.remove_repo(args.repo)
+    save_workspace(config, workspace)
     append_note(config, args.id, f"Removed repo `{args.repo}` from workspace metadata.")
     print(args.repo)
-    print_vscode_workspace_block(config, data)
+    print_vscode_workspace_block(config, workspace)
 
 
-def refresh_repo(config, data, repo):
+def refresh_repo(config, repo):
     path = repo.get("worktreePath")
     if not path or not Path(path).exists():
         return repo
@@ -731,15 +709,15 @@ def refresh_repo(config, data, repo):
 
 def cmd_repo_refresh(args):
     config = load_config()
-    data = load_workspace(config, args.id)
+    workspace = load_workspace(config, args.id)
     if args.repo:
-        index, repo = find_repo(data, args.repo)
-        data["repos"][index] = refresh_repo(config, data, repo)
+        repo = workspace.find_repo(args.repo)
+        workspace.replace_repo(args.repo, refresh_repo(config, repo))
         refreshed = [args.repo]
     else:
-        data["repos"] = [refresh_repo(config, data, repo) for repo in data.get("repos", [])]
-        refreshed = [repo.get("name") or "?" for repo in data.get("repos", [])]
-    save_workspace(config, data)
+        workspace.replace_all_repos([refresh_repo(config, repo) for repo in workspace.repos])
+        refreshed = [repo.get("name") or "?" for repo in workspace.repos]
+    save_workspace(config, workspace)
     append_note(config, args.id, f"Refreshed repo metadata: {', '.join(refreshed)}.")
     print("\n".join(refreshed))
 
@@ -764,14 +742,15 @@ def find_workspace_from_cwd(config):
 def cmd_status(args):
     config = load_config()
     workspace_id = args.id or find_workspace_from_cwd(config)
-    data = load_workspace(config, workspace_id)
-    print(f"Workspace: {data['id']}")
-    print(f"Title: {data.get('title', '')}")
-    print(f"State: {data.get('state', '')}")
-    if data.get("vscodeWorkspacePath"):
-        print(f"VS Code: {data.get('vscodeWorkspacePath')}")
+    workspace = load_workspace(config, workspace_id)
+    title = workspace.to_dict().get("title", "")
+    print(f"Workspace: {workspace.id}")
+    print(f"Title: {title}")
+    print(f"State: {workspace.state or ''}")
+    if workspace.vscode_workspace_path:
+        print(f"VS Code: {workspace.vscode_workspace_path}")
     print("")
-    for repo in data.get("repos", []):
+    for repo in workspace.repos:
         path = repo.get("worktreePath")
         print(f"- {repo.get('name')}: {path}")
         if path and Path(path).exists():
@@ -782,7 +761,7 @@ def cmd_status(args):
                 print(f"  ahead {config['base_remote']}/{config['base_branch']}: {info['aheadOfBase']}")
         else:
             print("  missing on disk")
-    prs = data.get("links", {}).get("githubPrs", [])
+    prs = workspace.github_prs
     if prs:
         print("")
         print("GitHub PRs:")
@@ -810,14 +789,14 @@ def cmd_status(args):
 
 def cmd_open(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    save_workspace(config, data)
-    path = Path(data.get("vscodeWorkspacePath") or vscode_workspace_path(config, args.id))
+    workspace = load_workspace(config, args.id)
+    save_workspace(config, workspace)
+    path = Path(workspace.vscode_workspace_path or vscode_workspace_path(config, args.id))
     if not path.exists():
-        path = write_vscode_workspace(config, data)
+        path = write_vscode_workspace(config, workspace)
     if args.print:
         print(path)
-        print_vscode_workspace_block(config, data)
+        print_vscode_workspace_block(config, workspace)
         return
     command = args.command or config.get("editor_command") or "code"
     parts = shlex.split(command)
@@ -829,7 +808,7 @@ def cmd_open(args):
         raise SystemExit(f"Editor command not found: {parts[0]}") from error
     append_note(config, args.id, f"Opened VS Code workspace `{path}`.")
     print(path)
-    print_vscode_workspace_block(config, data)
+    print_vscode_workspace_block(config, workspace)
 
 
 def doctor_issue(severity, code, message, fixable=False, fixed=False):
@@ -845,7 +824,7 @@ def doctor_issue(severity, code, message, fixable=False, fixed=False):
 
 
 def doctor_workspace(config, workspace_id, fix=False):
-    data = load_workspace(config, workspace_id)
+    workspace = load_workspace(config, workspace_id)
     issues = []
     root = ledger_dir(config, workspace_id)
     workspace_root = workspace_root_path(config, workspace_id)
@@ -854,7 +833,7 @@ def doctor_workspace(config, workspace_id, fix=False):
     required_files = {
         root / "spec.md": template("spec.md").format(
             id=workspace_id,
-            title=data.get("title") or workspace_id,
+            title=workspace.to_dict().get("title") or workspace_id,
             input="TBD.",
         ),
         root / "notes.md": template("notes.md"),
@@ -874,7 +853,7 @@ def doctor_workspace(config, workspace_id, fix=False):
                 issue["fixed"] = True
             issues.append(issue)
 
-    if data.get("cleanupStatus") != "done":
+    if workspace.cleanup_status != "done":
         pointer = workspace_root / ".workspace-id"
         if not pointer.exists() or pointer.read_text(encoding="utf-8").strip() != workspace_id:
             issue = doctor_issue(
@@ -889,7 +868,7 @@ def doctor_workspace(config, workspace_id, fix=False):
                 issue["fixed"] = True
             issues.append(issue)
 
-        expected_path, expected_payload = build_vscode_workspace(config, data)
+        expected_path, expected_payload = build_vscode_workspace(config, workspace)
         actual_payload = None
         if expected_path.exists():
             try:
@@ -904,11 +883,11 @@ def doctor_workspace(config, workspace_id, fix=False):
                 True,
             )
             if fix:
-                write_vscode_workspace(config, data)
+                write_vscode_workspace(config, workspace)
                 issue["fixed"] = True
             issues.append(issue)
 
-    for repo in data.get("repos", []):
+    for repo in workspace.repos:
         path = repo.get("worktreePath")
         name = repo.get("name") or path or "?"
         if not path or not Path(path).exists():
@@ -931,8 +910,8 @@ def doctor_workspace(config, workspace_id, fix=False):
             issues.append(doctor_issue("warning", "repo-dirty", f"Repo has uncommitted changes: {name}"))
 
     if fix:
-        data = load_workspace(config, workspace_id)
-        save_workspace(config, data)
+        workspace = load_workspace(config, workspace_id)
+        save_workspace(config, workspace)
     return issues
 
 
@@ -954,7 +933,7 @@ def print_doctor_report(workspace_id, issues):
 def cmd_doctor(args):
     config = load_config()
     if args.all:
-        workspace_ids = [data["id"] for data in iter_workspaces(config)]
+        workspace_ids = [workspace.id for workspace in iter_workspaces(config)]
     elif args.id:
         workspace_ids = args.id
     else:
@@ -976,16 +955,16 @@ def cmd_doctor(args):
     if args.fix:
         for result in results:
             if any(issue.get("fixed") for issue in result["issues"]):
-                data = load_workspace(config, result["workspace"])
-                print_vscode_workspace_block(config, data)
+                workspace = load_workspace(config, result["workspace"])
+                print_vscode_workspace_block(config, workspace)
 
 
-def repo_summary(data, config):
+def repo_summary(workspace, config):
     repo_names = []
     dirty = 0
     ahead = 0
     missing = 0
-    for repo in data.get("repos", []):
+    for repo in workspace.repos:
         repo_names.append(repo.get("name") or "?")
         path = repo.get("worktreePath")
         if not path or not Path(path).exists():
@@ -1013,24 +992,25 @@ def cmd_list(args):
 
     config = load_config()
     rows = []
-    for data in iter_workspaces(config):
-        state = data.get("state", "")
+    for workspace in iter_workspaces(config):
+        state = workspace.state or ""
         if args.state and state != args.state:
             continue
         active_only = args.active or (not args.all and not args.state)
         if active_only and state in DONE_STATES:
             continue
-        repos, local = repo_summary(data, config)
-        prs = len(data.get("links", {}).get("githubPrs", []))
+        repos, local = repo_summary(workspace, config)
+        raw = workspace.to_dict()
+        prs = len(workspace.github_prs)
         rows.append(
             {
-                "id": data.get("id", ""),
+                "id": raw.get("id", ""),
                 "state": state,
-                "updated": str(data.get("updatedAt", ""))[:10],
+                "updated": str(raw.get("updatedAt", ""))[:10],
                 "repos": repos,
                 "local": local,
                 "prs": str(prs),
-                "title": data.get("title", ""),
+                "title": raw.get("title", ""),
             }
         )
 
@@ -1074,24 +1054,24 @@ def cmd_list(args):
 def cmd_note(args):
     config = load_config()
     append_note(config, args.id, args.text)
-    data = load_workspace(config, args.id)
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.id)
+    save_workspace(config, workspace)
 
 
 def cmd_close(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    data["state"] = "closed"
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.id)
+    workspace.set_state("closed")
+    save_workspace(config, workspace)
     append_note(config, args.id, "Closed workspace.")
 
 
 def cmd_state(args):
     config = load_config()
-    data = load_workspace(config, args.id)
-    old_state = data.get("state")
-    data["state"] = args.state
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.id)
+    old_state = workspace.state
+    workspace.set_state(args.state)
+    save_workspace(config, workspace)
     note = args.note or f"State changed from `{old_state}` to `{args.state}`."
     append_note(config, args.id, note)
 
@@ -1121,7 +1101,7 @@ def print_issue_row(issue, *, sandcastle=False):
 def cmd_issue_create(args):
     config = load_config()
     sandcastle = args.sandcastle_mode
-    data = load_workspace(config, args.workspace_id)
+    workspace = load_workspace(config, args.workspace_id)
     path = issue_path(config, args.workspace_id, args.issue_id)
     if path.exists() and not args.force:
         raise SystemExit(f"Issue already exists: {path}")
@@ -1138,15 +1118,15 @@ def cmd_issue_create(args):
     if getattr(args, "repo", None):
         meta["repo"] = args.repo
     else:
-        default_repo = default_issue_repo(data.get("repos", []))
+        default_repo = default_issue_repo(workspace.repos)
         if default_repo:
             meta["repo"] = default_repo
     body = issue_body_from_args(args)
     path, meta = write_issue(
         config, args.workspace_id, args.issue_id, meta, body, sandcastle=sandcastle
     )
-    data = load_workspace(config, args.workspace_id)
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.workspace_id)
+    save_workspace(config, workspace)
     append_note(config, args.workspace_id, f"Created issue `{meta['id']}`: {meta['title']}")
     print(str(path))
 
@@ -1265,8 +1245,8 @@ def cmd_issue_set_status(args):
         branch=args.branch,
         sandcastle=sandcastle,
     )
-    data = load_workspace(config, args.workspace_id)
-    save_workspace(config, data)
+    workspace = load_workspace(config, args.workspace_id)
+    save_workspace(config, workspace)
     note = args.note or f"Issue `{meta['id']}` status changed from `{old_status}` to `{args.status}`."
     append_note(config, args.workspace_id, note)
     maybe_mark_user_review(config, args.workspace_id)
@@ -1277,7 +1257,7 @@ def cmd_cleanup_plan(args):
     config = load_config()
     workspace_ids = args.id
     if args.all:
-        workspace_ids = [data["id"] for data in iter_workspaces(config)]
+        workspace_ids = [workspace.id for workspace in iter_workspaces(config)]
     if not workspace_ids:
         raise SystemExit("Pass at least one workspace id, or --all.")
     if args.issues:
@@ -1340,11 +1320,9 @@ def cmd_sync_github(args):
     config = load_config()
     if shutil.which("gh") is None:
         raise SystemExit("gh is not installed or not on PATH")
-    data = load_workspace(config, args.id)
-    links = data.setdefault("links", {})
-    existing = links.setdefault("githubPrs", [])
+    workspace = load_workspace(config, args.id)
     seen = []
-    for repo in data.get("repos", []):
+    for repo in workspace.repos:
         path = repo.get("worktreePath")
         if not path or not Path(path).exists():
             continue
@@ -1387,31 +1365,22 @@ def cmd_sync_github(args):
             }
             seen.append(item)
     for item in seen:
-        replaced = False
-        for index, old in enumerate(existing):
-            if old.get("repo") == item.get("repo") and old.get("branch") == item.get("branch"):
-                existing[index] = {**old, **item}
-                replaced = True
-                break
-        if not replaced:
-            existing.append(item)
-    save_workspace(config, data)
+        workspace.record_github_pr(item)
+    save_workspace(config, workspace)
     append_note(config, args.id, f"Synced GitHub PR snapshots. Found {len(seen)} PR(s).")
     print(f"Found {len(seen)} PR(s).")
 
 
 def cmd_pr(args):
     config = load_config()
-    data = load_workspace(config, args.id)
+    workspace = load_workspace(config, args.id)
     state_by_event = {
         "opened": "pr-review",
         "feedback": "review-feedback",
         "merged": "dev-complete",
     }
-    data["state"] = state_by_event[args.event]
+    workspace.set_state(state_by_event[args.event])
     if args.url or args.number:
-        links = data.setdefault("links", {})
-        prs = links.setdefault("githubPrs", [])
         item = {
             "url": args.url,
             "number": args.number,
@@ -1419,11 +1388,11 @@ def cmd_pr(args):
             "merged": args.event == "merged",
             "lastSeenAt": now(),
         }
-        prs.append({key: value for key, value in item.items() if value is not None})
-    save_workspace(config, data)
-    note = args.note or f"PR lifecycle event `{args.event}` set workspace state to `{data['state']}`."
+        workspace.append_github_pr({key: value for key, value in item.items() if value is not None})
+    save_workspace(config, workspace)
+    note = args.note or f"PR lifecycle event `{args.event}` set workspace state to `{workspace.state}`."
     append_note(config, args.id, note)
-    print(data["state"])
+    print(workspace.state)
 
 
 def add_issue_subcommands(issue_sub, *, sandcastle=False):

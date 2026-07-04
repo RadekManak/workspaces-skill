@@ -24,12 +24,12 @@ class CleanupSafety:
         self.ledger = WorkspaceLedger(config)
         self.select_repo = select_repo
 
-    def workspace_root_extra_paths(self, data):
-        root = self.ledger.workspace_root_path(data["id"])
+    def workspace_root_extra_paths(self, workspace):
+        root = self.ledger.workspace_root_path(workspace.id)
         if not root.exists():
             return []
-        expected = {".workspace-id", f"{data['id']}.code-workspace"}
-        for repo in data.get("repos", []):
+        expected = {".workspace-id", f"{workspace.id}.code-workspace"}
+        for repo in workspace.repos:
             path = repo.get("worktreePath")
             if path and path_is_under(path, root):
                 rel = Path(path).resolve().relative_to(root.resolve())
@@ -45,7 +45,7 @@ class CleanupSafety:
         return [self.workspace_candidate(workspace_id) for workspace_id in workspace_ids]
 
     def workspace_candidate(self, workspace_id):
-        data = self.ledger.load(workspace_id)
+        workspace = self.ledger.load(workspace_id)
         root = self.ledger.workspace_root_path(workspace_id)
         repo_rows = []
         dirty_repos = []
@@ -53,7 +53,7 @@ class CleanupSafety:
         non_linked_repos = []
         external_repos = []
         total_ahead = 0
-        for repo in data.get("repos", []):
+        for repo in workspace.repos:
             path = repo.get("worktreePath")
             exists = bool(path and Path(path).exists())
             row = {
@@ -85,8 +85,8 @@ class CleanupSafety:
                 missing_repos.append(repo.get("name") or path or "?")
             repo_rows.append(row)
 
-        extra_paths = self.workspace_root_extra_paths(data)
-        prs = data.get("links", {}).get("githubPrs", [])
+        extra_paths = self.workspace_root_extra_paths(workspace)
+        prs = workspace.github_prs
         open_prs = [
             pr
             for pr in prs
@@ -95,8 +95,8 @@ class CleanupSafety:
         ]
         candidate = {
             "workspace": workspace_id,
-            "title": data.get("title"),
-            "state": data.get("state"),
+            "title": workspace.to_dict().get("title"),
+            "state": workspace.state,
             "workspaceRoot": str(root),
             "workspaceRootExists": root.exists(),
             "repos": repo_rows,
@@ -116,7 +116,7 @@ class CleanupSafety:
 
         soft_reasons = []
         hard_reasons = []
-        if data.get("state") not in DONE_STATES:
+        if workspace.state not in DONE_STATES:
             soft_reasons.append("workspace is not closed or dev-complete")
         if dirty_repos:
             soft_reasons.append("repo worktree has uncommitted changes")
@@ -244,9 +244,9 @@ class CleanupSafety:
             )
         return current
 
-    def _remove_workspace_worktrees(self, data, *, force=False):
-        root = self.ledger.workspace_root_path(data["id"])
-        for repo in data.get("repos", []):
+    def _remove_workspace_worktrees(self, workspace, *, force=False):
+        root = self.ledger.workspace_root_path(workspace.id)
+        for repo in workspace.repos:
             remove_linked_worktree(
                 repo.get("worktreePath"),
                 root,
@@ -259,15 +259,12 @@ class CleanupSafety:
         if root.exists():
             shutil.rmtree(root)
 
-    def _finalize_workspace_cleanup(self, data, candidate, action, note):
-        workspace_id = data["id"]
-        data["state"] = "closed"
-        data["cleanupStatus"] = "done"
-        data["cleanupAt"] = now()
-        data["cleanupAction"] = action
-        self.ledger.save(data)
+    def _finalize_workspace_cleanup(self, workspace, candidate, action, note):
+        workspace_id = workspace.id
+        workspace.mark_cleanup_done(action=action, at=now())
+        self.ledger.save(workspace)
         self.ledger.append_note(workspace_id, note)
-        return {**candidate, "cleanupStatus": data["cleanupStatus"], "cleanupAction": action}
+        return {**candidate, "cleanupStatus": workspace.cleanup_status, "cleanupAction": action}
 
     def _force_cleanup_note(self, candidate):
         parts = [f"Force-cleaned workspace. {candidate['reason']}."]
@@ -286,9 +283,9 @@ class CleanupSafety:
             )
 
         if action == "mark-done":
-            data = self.ledger.load(workspace_id)
+            workspace = self.ledger.load(workspace_id)
             return self._finalize_workspace_cleanup(
-                data,
+                workspace,
                 candidate,
                 "mark-done",
                 "Cleaned up workspace with action `mark-done`.",
@@ -300,9 +297,9 @@ class CleanupSafety:
                 f"({action}). Pass --force."
             )
 
-        data = self.ledger.load(workspace_id)
+        workspace = self.ledger.load(workspace_id)
         if action in {"force-eligible", "safe-to-remove"}:
-            self._remove_workspace_worktrees(data, force=action == "force-eligible")
+            self._remove_workspace_worktrees(workspace, force=action == "force-eligible")
             self._remove_workspace_root(workspace_id)
             cleanup_action = "force-removed" if action == "force-eligible" else "safe-to-remove"
             note = (
@@ -310,7 +307,7 @@ class CleanupSafety:
                 if action == "force-eligible"
                 else "Cleaned up workspace with action `safe-to-remove`."
             )
-            return self._finalize_workspace_cleanup(data, candidate, cleanup_action, note)
+            return self._finalize_workspace_cleanup(workspace, candidate, cleanup_action, note)
 
         raise SystemExit(
             f"Refusing cleanup for {workspace_id}: {candidate['reason']} ({action})"
@@ -321,12 +318,12 @@ class CleanupSafety:
             raise SystemExit("CleanupSafety requires a repo selector for issue cleanup.")
         candidates = []
         for workspace_id in workspace_ids:
-            data = self.ledger.load(workspace_id)
-            repo = self.select_repo(data, repo_name)
-            candidates.extend(self.issue_candidates_for_workspace(workspace_id, data, repo))
+            workspace = self.ledger.load(workspace_id)
+            repo = self.select_repo(workspace, repo_name)
+            candidates.extend(self.issue_candidates_for_workspace(workspace_id, workspace, repo))
         return candidates
 
-    def issue_candidates_for_workspace(self, workspace_id, data, repo):
+    def issue_candidates_for_workspace(self, workspace_id, workspace, repo):
         repo_path = repo.get("worktreePath")
         task_branch = repo.get("branch")
         repo_exists = bool(repo_path and Path(repo_path).exists())
@@ -342,7 +339,7 @@ class CleanupSafety:
             candidate = {
                 "item": item,
                 "workspace": workspace_id,
-                "workspaceState": data.get("state"),
+                "workspaceState": workspace.state,
                 "repo": repo.get("name"),
                 "repoPath": repo_path,
                 "taskBranch": task_branch,
@@ -460,7 +457,7 @@ class CleanupSafety:
             branch=issue["meta"].get("branch"),
             extra=extra,
         )
-        data = self.ledger.load(workspace_id)
-        self.ledger.save(data)
+        workspace = self.ledger.load(workspace_id)
+        self.ledger.save(workspace)
         self.ledger.append_note(workspace_id, f"Cleaned up `{item}` with action `{action}`.")
         return {**candidate, "cleanupStatus": meta.get("cleanupStatus")}

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .common import now, read_json, read_yaml, relative_or_absolute, slug, template, write_json, write_yaml
 from .sandcastle_state import maybe_invalidate_plan_for_repo_change
+from .workspace_model import Workspace
 
 
 class WorkspaceLedger:
@@ -148,7 +149,7 @@ class WorkspaceLedger:
         path = self.workspace_yaml_path(workspace_id)
         if not path.exists():
             raise SystemExit(f"Workspace not found: {workspace_id}")
-        return read_yaml(path)
+        return Workspace(read_yaml(path))
 
     def iter_workspaces(self):
         workspaces = Path(self.config["ledger_root"]) / "workspaces"
@@ -157,28 +158,28 @@ class WorkspaceLedger:
         for meta in sorted(workspaces.glob("*/workspace.yaml")):
             data = read_yaml(meta)
             if data.get("id"):
-                yield data
+                yield Workspace(data)
 
-    def save(self, data):
-        workspace_id = data["id"]
-        old_data = None
+    def save(self, workspace):
+        workspace_id = workspace.id
+        old_workspace = None
         path = self.workspace_yaml_path(workspace_id)
         if path.exists():
-            old_data = read_yaml(path)
-        data["updatedAt"] = now()
-        if data.get("cleanupStatus") == "done":
-            old_path = data.get("vscodeWorkspacePath")
+            old_workspace = Workspace(read_yaml(path))
+        workspace.set_updated_at(now())
+        if workspace.cleanup_status == "done":
+            old_path = workspace.vscode_workspace_path
             if old_path and Path(old_path).exists():
                 Path(old_path).unlink()
-            data.pop("vscodeWorkspacePath", None)
+            workspace.clear_vscode_workspace_path()
         else:
-            data["vscodeWorkspacePath"] = str(self.write_vscode_workspace(data))
-        write_yaml(path, data)
-        if old_data is not None:
-            maybe_invalidate_plan_for_repo_change(self, workspace_id, old_data, data)
+            workspace.set_vscode_workspace_path(str(self.write_vscode_workspace(workspace)))
+        write_yaml(path, workspace.to_dict())
+        if old_workspace is not None:
+            maybe_invalidate_plan_for_repo_change(self, workspace_id, old_workspace, workspace)
 
-    def build_vscode_workspace(self, data):
-        workspace_id = data["id"]
+    def build_vscode_workspace(self, workspace):
+        workspace_id = workspace.id
         path = self.vscode_workspace_path(workspace_id)
         workspace_root = path.parent
 
@@ -189,7 +190,7 @@ class WorkspaceLedger:
             }
         ]
         seen_paths = {str(Path(self.ledger_dir(workspace_id)).resolve())}
-        for repo in data.get("repos", []):
+        for repo in workspace.repos:
             repo_path = repo.get("worktreePath")
             if not repo_path:
                 continue
@@ -216,8 +217,8 @@ class WorkspaceLedger:
         }
         return path, payload
 
-    def write_vscode_workspace(self, data):
-        path, payload = self.build_vscode_workspace(data)
+    def write_vscode_workspace(self, workspace):
+        path, payload = self.build_vscode_workspace(workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return path
@@ -235,7 +236,7 @@ class WorkspaceLedger:
         root = self.ledger_dir(workspace_id)
         meta = root / "workspace.yaml"
         if meta.exists():
-            return read_yaml(meta)
+            return Workspace(read_yaml(meta))
 
         created = now()
         data = {
@@ -256,6 +257,7 @@ class WorkspaceLedger:
             encoding="utf-8",
         )
         (root / "notes.md").write_text(template("notes.md"), encoding="utf-8")
-        self.save(data)
+        workspace = Workspace(data)
+        self.save(workspace)
         self.append_note(workspace_id, f"Created workspace `{workspace_id}`.")
-        return data
+        return workspace

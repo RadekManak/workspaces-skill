@@ -3,34 +3,11 @@ from .common import repo_identity_snapshot
 from .issues import sandcastle_issue_meta
 
 
-def current_plan(data):
-    return (data.get("sandcastle") or {}).get("currentPlan")
-
-
-def targeted_issue_ids(data):
-    pointer = current_plan(data)
-    if not pointer:
-        return set()
-    return {str(item) for item in pointer.get("targetedIssueIds") or []}
-
-
-def clear_current_plan_pointer(data):
-    sandcastle = dict(data.get("sandcastle") or {})
-    if "currentPlan" not in sandcastle:
-        return False
-    sandcastle.pop("currentPlan", None)
-    if sandcastle:
-        data["sandcastle"] = sandcastle
-    else:
-        data.pop("sandcastle", None)
-    return True
-
-
 def invalidate_current_plan(ledger, workspace_id, *, reason):
-    data = ledger.load(workspace_id)
-    if not clear_current_plan_pointer(data):
+    workspace = ledger.load(workspace_id)
+    if not workspace.clear_current_sandcastle_plan():
         return False
-    ledger.save(data)
+    ledger.save(workspace)
     ledger.append_note(workspace_id, reason)
     return True
 
@@ -46,8 +23,8 @@ def _sandcastle_meta_snapshot(meta):
 
 
 def maybe_invalidate_plan_for_issue_edit(ledger, workspace_id, issue_id, old_meta, new_meta):
-    data = ledger.load(workspace_id)
-    if issue_id not in targeted_issue_ids(data):
+    workspace = ledger.load(workspace_id)
+    if issue_id not in workspace.targeted_issue_ids():
         return False
     old_snapshot = _sandcastle_meta_snapshot(old_meta)
     new_snapshot = _sandcastle_meta_snapshot(new_meta)
@@ -64,11 +41,11 @@ def maybe_invalidate_plan_for_issue_edit(ledger, workspace_id, issue_id, old_met
     )
 
 
-def maybe_invalidate_plan_for_repo_change(ledger, workspace_id, old_data, new_data):
-    if not current_plan(new_data):
+def maybe_invalidate_plan_for_repo_change(ledger, workspace_id, old_workspace, new_workspace):
+    if not new_workspace.current_sandcastle_plan:
         return False
-    old_repos = repo_identity_snapshot(old_data.get("repos"))
-    new_repos = repo_identity_snapshot(new_data.get("repos"))
+    old_repos = repo_identity_snapshot(old_workspace.repos)
+    new_repos = repo_identity_snapshot(new_workspace.repos)
     if old_repos == new_repos:
         return False
     return invalidate_current_plan(

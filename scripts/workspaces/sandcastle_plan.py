@@ -22,8 +22,8 @@ def repo_names(repos):
     return {str(repo.get("name") or "") for repo in repos}
 
 
-def select_plan_repos(data, repo_name=None):
-    repos = data.get("repos", [])
+def select_plan_repos(workspace, repo_name=None):
+    repos = workspace.repos
     if not repos:
         raise SystemExit("Workspace has no repos. Add or adopt one before running Sandcastle.")
     if repo_name:
@@ -302,8 +302,8 @@ def repo_record(repo):
     return repo_projection(repo, "name", "worktreePath", "branch", "remote")
 
 
-def write_plan_artifact(data, repos, view, *, ledger_dir, runs_dir):
-    workspace_id = data["id"]
+def write_plan_artifact(workspace, repos, view, *, ledger_dir, runs_dir):
+    workspace_id = workspace.id
     created = now()
     targeted_by_repo = {}
     for entry in view["targetedEntries"]:
@@ -316,8 +316,8 @@ def write_plan_artifact(data, repos, view, *, ledger_dir, runs_dir):
         "createdAt": created,
         "workspace": {
             "id": workspace_id,
-            "title": data.get("title"),
-            "state": data.get("state"),
+            "title": workspace.to_dict().get("title"),
+            "state": workspace.state,
             "ledgerDir": str(ledger_dir),
             "specPath": str(ledger_dir / "spec.md"),
         },
@@ -337,16 +337,16 @@ def write_plan_artifact(data, repos, view, *, ledger_dir, runs_dir):
     return path, payload
 
 
-def set_current_plan_pointer(data, *, plan_path, repos, targeted_issue_ids, fingerprint):
-    sandcastle = dict(data.get("sandcastle") or {})
-    sandcastle["currentPlan"] = {
-        "path": str(plan_path),
-        "repos": sorted(repo.get("name") for repo in repos if repo.get("name")),
-        "targetedIssueIds": list(targeted_issue_ids),
-        "fingerprint": fingerprint,
-        "createdAt": now(),
-    }
-    data["sandcastle"] = sandcastle
+def set_current_plan_pointer(workspace, *, plan_path, repos, targeted_issue_ids, fingerprint):
+    workspace.set_current_sandcastle_plan(
+        {
+            "path": str(plan_path),
+            "repos": sorted(repo.get("name") for repo in repos if repo.get("name")),
+            "targetedIssueIds": list(targeted_issue_ids),
+            "fingerprint": fingerprint,
+            "createdAt": now(),
+        }
+    )
 
 
 def enrich_targeted_issues(ledger, workspace_id, targeted_entries):
@@ -369,22 +369,22 @@ def enrich_targeted_issues(ledger, workspace_id, targeted_entries):
         )
 
 
-def plan_workspace(config, data, workspace_id, repos, *, limit=None):
+def plan_workspace(config, workspace, workspace_id, repos, *, limit=None):
     """Plan Sandcastle execution for `repos` (the possibly `--repo`-narrowed scope).
 
-    `data["repos"]` (the full workspace repo list) is threaded separately
+    `workspace.repos` (the full workspace repo list) is threaded separately
     into `build_plan_view` so that repo resolution for unset-`repo:` issues
     is always evaluated against the whole workspace, never against a
     `--repo`-narrowed scope.
     """
     ledger = WorkspaceLedger(config)
-    all_repos = data.get("repos", [])
+    all_repos = workspace.repos
     view = build_plan_view(ledger, workspace_id, all_repos, repos, limit=limit)
     enrich_targeted_issues(ledger, workspace_id, view["targetedEntries"])
     ledger_dir = ledger.ledger_dir(workspace_id)
     runs = ledger.runs_dir(workspace_id)
     plan_path, payload = write_plan_artifact(
-        data,
+        workspace,
         repos,
         view,
         ledger_dir=ledger_dir,
@@ -392,7 +392,7 @@ def plan_workspace(config, data, workspace_id, repos, *, limit=None):
     )
     targeted_issue_ids = [entry["id"] for entry in view["targetedEntries"]]
     set_current_plan_pointer(
-        data,
+        workspace,
         plan_path=plan_path,
         repos=repos,
         targeted_issue_ids=targeted_issue_ids,
