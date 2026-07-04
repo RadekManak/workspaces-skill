@@ -28,12 +28,17 @@ from workspaces.common import (
 from workspaces.git import (
     github_repo_from_remote,
     git_info,
-    remove_linked_worktree,
 )
 from workspaces.issues import (
     ISSUE_DONE_STATUSES,
     default_issue_repo,
     sandcastle_issue_meta,
+)
+from workspaces.repo import (
+    add_source_repo_to_workspace,
+    refresh_repo,
+    remove_repo_worktree,
+    select_repo,
 )
 from workspaces.sandcastle_execute import execute_plan, format_execute_summary, resolve_execution_plan
 from workspaces.sandcastle_plan import plan_workspace, select_plan_repos
@@ -170,18 +175,6 @@ def ready_issues(config, workspace_id, *, sandcastle=False):
     return issue_model.ready_issues(
         WorkspaceLedger(config), workspace_id, sandcastle=sandcastle
     )
-
-
-def select_repo(workspace, repo_name=None):
-    repos = workspace.repos
-    if repo_name:
-        return workspace.find_repo(repo_name)
-    if not repos:
-        raise SystemExit("Workspace has no repos. Add or adopt one before running Sandcastle.")
-    if len(repos) > 1:
-        names = ", ".join(repo.get("name") or "?" for repo in repos)
-        raise SystemExit(f"Workspace has multiple repos ({names}). Pass --repo.")
-    return repos[0]
 
 
 def print_sandcastle_plan_summary(view):
@@ -544,47 +537,6 @@ def cmd_config(args):
     print(yaml.safe_dump(load_config(), sort_keys=False).strip())
 
 
-def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
-    workspace_id = workspace.id
-    workspace_root = workspace_root_path(config, workspace_id)
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    (workspace_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
-    source = Path(config["source_root"]) / repo_name
-    dest = workspace_root / repo_name
-    if not source.exists():
-        raise SystemExit(f"Source repo not found: {source}")
-    if not dest.exists():
-        run(
-            [
-                "git",
-                "-C",
-                str(source),
-                "worktree",
-                "add",
-                "-b",
-                branch or workspace_id,
-                str(dest),
-                f"{config['base_remote']}/{config['base_branch']}",
-            ],
-            capture=True,
-        )
-    info = git_info(dest, config)
-    workspace.upsert_repo(
-        {
-            "name": repo_name,
-            "sourcePath": str(source),
-            "worktreePath": str(dest),
-            "branch": info["branch"],
-            "baseRemote": config["base_remote"],
-            "baseBranch": config["base_branch"],
-            "pushRemote": config["push_remote"],
-            "remote": info["remote"],
-            "forkRemote": info["forkRemote"],
-        },
-    )
-    return dest
-
-
 def cmd_create(args):
     config = load_config()
     workspace = ensure_workspace(config, args.id, args.title, args.state, args.input)
@@ -668,14 +620,6 @@ def cmd_repo_adopt(args):
     print_vscode_workspace_block(config, workspace)
 
 
-def remove_repo_worktree(config, workspace, repo):
-    remove_linked_worktree(
-        repo.get("worktreePath"),
-        workspace_root_path(config, workspace.id),
-        source_path=repo.get("sourcePath"),
-    )
-
-
 def cmd_repo_remove(args):
     config = load_config()
     workspace = load_workspace(config, args.id)
@@ -687,24 +631,6 @@ def cmd_repo_remove(args):
     append_note(config, args.id, f"Removed repo `{args.repo}` from workspace metadata.")
     print(args.repo)
     print_vscode_workspace_block(config, workspace)
-
-
-def refresh_repo(config, repo):
-    path = repo.get("worktreePath")
-    if not path or not Path(path).exists():
-        return repo
-    info = git_info(path, config)
-    return {
-        **repo,
-        "name": repo.get("name") or info["name"],
-        "worktreePath": info["root"],
-        "branch": info["branch"],
-        "baseRemote": repo.get("baseRemote") or config["base_remote"],
-        "baseBranch": repo.get("baseBranch") or config["base_branch"],
-        "pushRemote": repo.get("pushRemote") or config["push_remote"],
-        "remote": info["remote"],
-        "forkRemote": info["forkRemote"],
-    }
 
 
 def cmd_repo_refresh(args):

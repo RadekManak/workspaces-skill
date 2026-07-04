@@ -19,6 +19,7 @@ WORKSPACE_SANDCASTLE = ROOT / "scripts" / "workspace_with_sandcastle.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces import doctor
+from workspaces import repo
 from workspaces.common import DEFAULT_CONFIG
 from workspaces.git import branch_exists
 from workspaces.issues import sandcastle_issue_meta
@@ -3139,6 +3140,89 @@ def test_doctor_check_workspace_saves_unconditionally_on_fix():
             )
 
 
+def test_repo_select_repo_single_and_multi_and_named():
+    empty_workspace = Workspace({"id": "w1", "repos": []})
+    try:
+        repo.select_repo(empty_workspace)
+        raise AssertionError("Expected select_repo to raise SystemExit for a workspace with no repos")
+    except SystemExit:
+        pass
+
+    single_workspace = Workspace({"id": "w2", "repos": [{"name": "solo"}]})
+    if repo.select_repo(single_workspace) != {"name": "solo"}:
+        raise AssertionError("Expected select_repo to default to the only repo")
+
+    multi_workspace = Workspace(
+        {"id": "w3", "repos": [{"name": "alpha"}, {"name": "beta"}]}
+    )
+    try:
+        repo.select_repo(multi_workspace)
+        raise AssertionError("Expected select_repo to raise SystemExit when multiple repos and no --repo")
+    except SystemExit:
+        pass
+    if repo.select_repo(multi_workspace, repo_name="beta") != {"name": "beta"}:
+        raise AssertionError("Expected select_repo to return the named repo")
+
+
+def test_repo_add_source_repo_creates_worktree_and_upserts():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        make_source_repo(tmp_dir, "app")
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("REPO-ADD", title="Repo add test")
+
+        dest = repo.add_source_repo_to_workspace(config, workspace, "app")
+
+        if not dest.exists():
+            raise AssertionError(f"Expected worktree to be created at {dest}")
+        source = tmp_dir / "src" / "app"
+        worktrees = run(["git", "-C", str(source), "worktree", "list", "--porcelain"]).stdout
+        if str(dest) not in worktrees:
+            raise AssertionError(f"Expected `git worktree add` to register {dest}, got:\n{worktrees}")
+
+        repos = workspace.repos
+        if len(repos) != 1 or repos[0]["name"] != "app":
+            raise AssertionError(f"Expected upserted repo named 'app', got {repos}")
+        if repos[0]["branch"] != "REPO-ADD":
+            raise AssertionError(f"Expected default branch to be the workspace id, got {repos[0]}")
+        if repos[0]["worktreePath"] != str(dest) or repos[0]["sourcePath"] != str(source):
+            raise AssertionError(f"Expected worktree/source paths recorded, got {repos[0]}")
+
+
+def test_repo_refresh_repo_updates_git_metadata():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        repo_path = tmp_dir / "repo"
+        repo_path.mkdir(parents=True)
+        run(["git", "-C", str(repo_path), "init", "-b", "main"])
+        run(["git", "-C", str(repo_path), "config", "user.email", "test@example.com"])
+        run(["git", "-C", str(repo_path), "config", "user.name", "Test User"])
+        (repo_path / "README.md").write_text("hello\n", encoding="utf-8")
+        run(["git", "-C", str(repo_path), "add", "README.md"])
+        run(["git", "-C", str(repo_path), "commit", "-m", "init"])
+        run(["git", "-C", str(repo_path), "checkout", "-b", "feature"])
+
+        config = _doctor_test_config(tmp_dir)
+        repo_dict = {
+            "name": "repo",
+            "worktreePath": str(repo_path),
+            "branch": "main",
+            "baseRemote": config["base_remote"],
+            "baseBranch": config["base_branch"],
+            "pushRemote": config["push_remote"],
+        }
+
+        refreshed = repo.refresh_repo(config, repo_dict)
+
+        if refreshed["branch"] != "feature":
+            raise AssertionError(f"Expected refreshed branch to be 'feature', got {refreshed}")
+        if not refreshed.get("worktreePath"):
+            raise AssertionError(f"Expected refreshed repo to keep a worktreePath, got {refreshed}")
+        if refreshed["baseRemote"] != config["base_remote"] or refreshed["pushRemote"] != config["push_remote"]:
+            raise AssertionError(f"Expected refresh_repo to preserve base/push remote config, got {refreshed}")
+
+
 WORKSPACE_MODEL_TESTS = [
     test_workspace_model_state_roundtrip,
     test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
@@ -3151,6 +3235,9 @@ WORKSPACE_MODEL_TESTS = [
     test_doctor_check_workspace_fixes_missing_dirs_and_files,
     test_doctor_check_workspace_detects_repo_branch_drift,
     test_doctor_check_workspace_saves_unconditionally_on_fix,
+    test_repo_select_repo_single_and_multi_and_named,
+    test_repo_add_source_repo_creates_worktree_and_upserts,
+    test_repo_refresh_repo_updates_git_metadata,
 ]
 
 
