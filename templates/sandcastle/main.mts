@@ -6,12 +6,29 @@ import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 
 const execFileAsync = promisify(execFile);
 
+type DependencyRef = {
+  id: string;
+  repo: string;
+};
+
 type PlanIssue = {
   id: string;
   title: string;
   branch: string;
   body: string;
   path: string;
+  dependsOn: DependencyRef[];
+};
+
+type PlanRepo = {
+  name: string;
+  worktreePath: string;
+};
+
+type SandboxMount = {
+  hostPath: string;
+  sandboxPath: string;
+  readonly: boolean;
 };
 
 type Plan = {
@@ -25,6 +42,7 @@ type Plan = {
     worktreePath: string;
     branch?: string;
   };
+  repos: PlanRepo[];
   issues: PlanIssue[];
 };
 
@@ -100,6 +118,33 @@ const extractReview = (stdout: string): ReviewDecision => {
   };
 };
 
+// dependsOn is deduped by repo when the runner plan is written; dedupe again defensively.
+const buildDependencyMounts = (plan: Plan, issue: PlanIssue): SandboxMount[] => {
+  const ownRepo = plan.repo.name ?? "";
+  const reposByName = new Map(plan.repos.map((repo) => [repo.name, repo]));
+  const seen = new Set<string>();
+  const mounts: SandboxMount[] = [];
+
+  for (const dep of issue.dependsOn ?? []) {
+    const repoName = dep.repo;
+    if (!repoName || repoName === ownRepo || seen.has(repoName)) {
+      continue;
+    }
+    seen.add(repoName);
+    const repo = reposByName.get(repoName);
+    if (!repo?.worktreePath) {
+      continue;
+    }
+    mounts.push({
+      hostPath: repo.worktreePath,
+      sandboxPath: `related-repos/${repoName}`,
+      readonly: true,
+    });
+  }
+
+  return mounts;
+};
+
 const mergeBranch = async (branch: string) => {
   try {
     await execFileAsync("git", ["merge", branch, "--no-edit"], {
@@ -118,10 +163,12 @@ const runIssue = async (plan: Plan, issue: PlanIssue): Promise<IssueResult> => {
     ? { sandbox: { onSandboxReady: [{ command: SETUP_COMMAND }] } }
     : undefined;
 
+  const mounts = buildDependencyMounts(plan, issue);
   const sandbox = await sandcastle.createSandbox({
     branch: issue.branch,
     baseBranch: plan.repo.branch,
-    sandbox: docker(),
+    // sandcastle docker() accepts { hostPath, sandboxPath, readonly } mounts per spec.
+    sandbox: docker({ mounts }),
     hooks,
   });
 

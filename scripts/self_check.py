@@ -19,6 +19,7 @@ WORKSPACE_SANDCASTLE = ROOT / "scripts" / "workspace_with_sandcastle.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces.git import branch_exists
+from workspaces.sandcastle_execute import dependency_mounts_for_issue
 
 
 def run(cmd, *, env=None, cwd=None, check=True):
@@ -1657,6 +1658,409 @@ def test_sandcastle_execute_own_reconciliation_does_not_self_invalidate(tmp, wor
     assert_contains(notes_after_edit, "invalidated")
 
 
+def runner_plan_for(tmp, workspace_id, *, wave, repo):
+    runs_dir = tmp / "ledger" / "workspaces" / workspace_id / "runs"
+    prefix = f"sandcastle-run-plan-w{wave}-{repo}-"
+    matches = sorted(runs_dir.glob(f"{prefix}*"))
+    if not matches:
+        raise AssertionError(f"No runner plan for wave {wave} repo {repo} under {runs_dir}")
+    return json.loads(matches[-1].read_text(encoding="utf-8"))
+
+
+def cross_repo_dep_repos(runner_plan):
+    """Repos that would receive read-only mounts for issues in this runner plan."""
+    cross = set()
+    for issue in runner_plan["issues"]:
+        for mount in dependency_mounts_for_issue(runner_plan, issue):
+            cross.add(mount["sandboxPath"].removeprefix("related-repos/"))
+    return sorted(cross)
+
+
+def rewrite_issue_blocked_by(issue_path, blocked_by):
+    text = issue_path.read_text(encoding="utf-8")
+    meta = read_frontmatter(issue_path)
+    meta["blockedBy"] = [str(item) for item in blocked_by]
+    body = text[text.find("\n---\n", 4) + len("\n---\n") :]
+    frontmatter = yaml.safe_dump(meta, sort_keys=False, allow_unicode=False).strip()
+    issue_path.write_text(f"---\n{frontmatter}\n---\n{body}", encoding="utf-8")
+
+
+def sync_plan_blocked_by_for_issue(plan_path, issue_id, blocked_by):
+    """Keep the locked plan artifact's blockedBy in sync after a direct issue edit."""
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    blocked_by = [str(item) for item in blocked_by]
+    for bucket in (payload.get("issuesByRepo") or {}).values():
+        for entry in bucket.get("targeted") or []:
+            if entry.get("id") == issue_id:
+                entry["blockedBy"] = list(blocked_by)
+        for entry in bucket.get("readyButNotTargeted") or []:
+            if entry.get("id") == issue_id:
+                entry["blockedBy"] = list(blocked_by)
+        for item in bucket.get("blocked") or []:
+            entry = item.get("issue") or {}
+            if entry.get("id") == issue_id:
+                entry["blockedBy"] = list(blocked_by)
+    plan_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def test_sandcastle_runner_plan_cross_repo_dependency(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    setup_cross_repo_execute_workspace(tmp, env, workspace_cli)
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "EXEC", "--command", fake],
+        env=env,
+    )
+
+    frontend_plan = runner_plan_for(tmp, "EXEC", wave=0, repo="frontend")
+    backend_plan = runner_plan_for(tmp, "EXEC", wave=1, repo="backend")
+
+    for plan in (frontend_plan, backend_plan):
+        repo_names = sorted(item["name"] for item in plan["repos"])
+        if repo_names != ["backend", "frontend"]:
+            raise AssertionError(f"Expected full workspace repo list, got {plan['repos']}")
+        for item in plan["repos"]:
+            if not item.get("worktreePath"):
+                raise AssertionError(f"Expected worktreePath on repo entry, got {item}")
+        if "issueRepos" in plan:
+            raise AssertionError("Runner plan must not include issueRepos; repo is embedded in dependsOn")
+
+    if frontend_plan["issues"][0]["id"] != "fe-1" or frontend_plan["issues"][0]["dependsOn"] != []:
+        raise AssertionError(f"Expected fe-1 with empty dependsOn, got {frontend_plan['issues'][0]}")
+
+    backend_issue = backend_plan["issues"][0]
+    expected_depends_on = [{"id": "fe-1", "repo": "frontend"}]
+    if backend_issue["id"] != "be-1" or backend_issue["dependsOn"] != expected_depends_on:
+        raise AssertionError(f"Expected be-1 cross-repo dependsOn, got {backend_issue}")
+
+    if cross_repo_dep_repos(frontend_plan) != []:
+        raise AssertionError(
+            f"Same-wave frontend issue should have no cross-repo deps, got {cross_repo_dep_repos(frontend_plan)}"
+        )
+    if cross_repo_dep_repos(backend_plan) != ["frontend"]:
+        raise AssertionError(
+            f"Backend issue should mount frontend only, got {cross_repo_dep_repos(backend_plan)}"
+        )
+
+    mounts = dependency_mounts_for_issue(backend_plan, backend_issue)
+    if len(mounts) != 1:
+        raise AssertionError(f"Expected one readonly mount, got {mounts}")
+    mount = mounts[0]
+    if mount["readonly"] is not True:
+        raise AssertionError(f"Dependency mount must be readonly, got {mount}")
+    if mount["sandboxPath"] != "related-repos/frontend":
+        raise AssertionError(f"Unexpected sandboxPath: {mount['sandboxPath']}")
+    frontend_entry = next(item for item in backend_plan["repos"] if item["name"] == "frontend")
+    if mount["hostPath"] != frontend_entry["worktreePath"]:
+        raise AssertionError("Mount hostPath must be the dependency repo worktreePath")
+
+
+def test_sandcastle_runner_plan_same_repo_dependency_no_cross_repos(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo")
+    run([str(workspace_cli), "create", "SAMEREPO", "--title", "Same repo deps", "--repo", "repo"], env=env)
+    run([str(workspace_cli), "issue", "create", "SAMEREPO", "1", "--title", "First"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "SAMEREPO",
+            "2",
+            "--title",
+            "Second",
+            "--blocked-by",
+            "1",
+        ],
+        env=env,
+    )
+    run([str(workspace_cli), "sandcastle", "plan", "SAMEREPO", "--json"], env=env)
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "SAMEREPO", "--command", fake],
+        env=env,
+    )
+
+    first_plan = runner_plan_for(tmp, "SAMEREPO", wave=0, repo="repo")
+    second_plan = runner_plan_for(tmp, "SAMEREPO", wave=1, repo="repo")
+
+    if first_plan["issues"][0]["dependsOn"] != []:
+        raise AssertionError(f"Expected issue 1 with no dependsOn, got {first_plan['issues'][0]}")
+    if second_plan["issues"][0]["dependsOn"] != []:
+        raise AssertionError(
+            f"Same-repo blocker must not appear in dependsOn, got {second_plan['issues'][0]}"
+        )
+
+    if cross_repo_dep_repos(first_plan) != []:
+        raise AssertionError(f"Issue 1 should have no cross-repo deps, got {cross_repo_dep_repos(first_plan)}")
+    if cross_repo_dep_repos(second_plan) != []:
+        raise AssertionError(
+            f"Same-repo dependency must not yield cross-repo mounts, got {cross_repo_dep_repos(second_plan)}"
+        )
+
+
+def test_sandcastle_runner_plan_three_repo_mount_selection(tmp, workspace_cli):
+    """Issue A (repo1) blocked by B (repo2, cross) and C (repo1, same) mounts repo2 only."""
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo1")
+    make_source_repo(tmp, "repo2")
+    make_source_repo(tmp, "repo3")
+    run([str(workspace_cli), "create", "THREE", "--title", "Three repos", "--repo", "repo1"], env=env)
+    run([str(workspace_cli), "repo", "add", "THREE", "repo2"], env=env)
+    run([str(workspace_cli), "repo", "add", "THREE", "repo3"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "THREE",
+            "issue-b",
+            "--title",
+            "B in repo2",
+            "--repo",
+            "repo2",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "THREE",
+            "issue-c",
+            "--title",
+            "C in repo1",
+            "--repo",
+            "repo1",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "THREE",
+            "issue-a",
+            "--title",
+            "A cross and same repo deps",
+            "--repo",
+            "repo1",
+            "--blocked-by",
+            "issue-b",
+            "--blocked-by",
+            "issue-c",
+        ],
+        env=env,
+    )
+    run([str(workspace_cli), "sandcastle", "plan", "THREE", "--json"], env=env)
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "THREE", "--command", fake],
+        env=env,
+    )
+
+    # Wave 0: repo2 issue-b, repo1 issue-c (parallel). Wave 1: repo1 issue-a.
+    repo2_plan = runner_plan_for(tmp, "THREE", wave=0, repo="repo2")
+    repo1_wave0 = runner_plan_for(tmp, "THREE", wave=0, repo="repo1")
+    repo1_wave1 = runner_plan_for(tmp, "THREE", wave=1, repo="repo1")
+
+    issue_a = next(item for item in repo1_wave1["issues"] if item["id"] == "issue-a")
+    if issue_a["dependsOn"] != [{"id": "issue-b", "repo": "repo2"}]:
+        raise AssertionError(f"Expected cross-repo dependsOn only, got {issue_a['dependsOn']}")
+
+    mounts = dependency_mounts_for_issue(repo1_wave1, issue_a)
+    if len(mounts) != 1 or mounts[0]["sandboxPath"] != "related-repos/repo2":
+        raise AssertionError(f"Expected single repo2 mount, got {mounts}")
+    if mounts[0]["readonly"] is not True:
+        raise AssertionError(f"Mount must be readonly, got {mounts[0]}")
+    if cross_repo_dep_repos(repo1_wave1) != ["repo2"]:
+        raise AssertionError(f"Must not mount repo1 (self) or repo3 (unrelated), got {cross_repo_dep_repos(repo1_wave1)}")
+
+    if repo2_plan["issues"][0]["dependsOn"] != []:
+        raise AssertionError(f"repo2 blocker should have no cross-repo deps, got {repo2_plan['issues'][0]}")
+    if repo1_wave0["issues"][0]["dependsOn"] != []:
+        raise AssertionError(f"repo1 wave-0 issue should have no cross-repo deps, got {repo1_wave0['issues'][0]}")
+
+
+def test_sandcastle_runner_plan_depends_on_full_blocked_by_after_merge(tmp, workspace_cli):
+    """dependsOn uses full blockedBy from issue metadata, not just the current wave graph."""
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    setup_cross_repo_execute_workspace(tmp, env, workspace_cli)
+    run([str(workspace_cli), "issue", "set-status", "EXEC", "fe-1", "merged"], env=env)
+    run([str(workspace_cli), "sandcastle", "plan", "EXEC", "--json"], env=env)
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "EXEC", "--command", fake],
+        env=env,
+    )
+
+    backend_plan = runner_plan_for(tmp, "EXEC", wave=0, repo="backend")
+    backend_issue = backend_plan["issues"][0]
+    if backend_issue["dependsOn"] != [{"id": "fe-1", "repo": "frontend"}]:
+        raise AssertionError(
+            f"Merged cross-repo blocker must still appear in dependsOn, got {backend_issue}"
+        )
+    mounts = dependency_mounts_for_issue(backend_plan, backend_issue)
+    if len(mounts) != 1 or mounts[0]["readonly"] is not True:
+        raise AssertionError(f"Expected readonly mount for merged blocker repo, got {mounts}")
+
+
+def test_sandcastle_runner_plan_omits_unresolvable_blockers_from_depends_on(tmp, workspace_cli):
+    """Missing blocker IDs and unresolvable-repo blockers are skipped in dependsOn."""
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo1")
+    make_source_repo(tmp, "repo2")
+    run([str(workspace_cli), "create", "UNRES", "--title", "Unresolvable blockers", "--repo", "repo1"], env=env)
+    run([str(workspace_cli), "repo", "add", "UNRES", "repo2"], env=env)
+    run(
+        [str(workspace_cli), "issue", "create", "UNRES", "issue-ambiguous", "--title", "No repo set"],
+        env=env,
+    )
+    run([str(workspace_cli), "issue", "set-status", "UNRES", "issue-ambiguous", "merged"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "UNRES",
+            "issue-b",
+            "--title",
+            "Resolvable cross-repo blocker",
+            "--repo",
+            "repo2",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "UNRES",
+            "issue-a",
+            "--title",
+            "Depends on resolvable and unresolvable blockers",
+            "--repo",
+            "repo1",
+            "--blocked-by",
+            "issue-b",
+            "--blocked-by",
+            "issue-ambiguous",
+        ],
+        env=env,
+    )
+    run([str(workspace_cli), "sandcastle", "plan", "UNRES", "--json"], env=env)
+
+    issue_a_path = tmp / "ledger" / "workspaces" / "UNRES" / "issues" / "issue-a.md"
+    blocked_by = ["issue-b", "issue-ambiguous", "missing-ghost"]
+    rewrite_issue_blocked_by(issue_a_path, blocked_by)
+    plan_path = Path(current_plan_pointer(tmp, "UNRES")["path"])
+    sync_plan_blocked_by_for_issue(plan_path, "issue-a", blocked_by)
+
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "UNRES", "--command", fake],
+        env=env,
+    )
+
+    repo1_wave1 = runner_plan_for(tmp, "UNRES", wave=1, repo="repo1")
+    issue_a = next(item for item in repo1_wave1["issues"] if item["id"] == "issue-a")
+    expected_depends_on = [{"id": "issue-b", "repo": "repo2"}]
+    if issue_a["dependsOn"] != expected_depends_on:
+        raise AssertionError(
+            f"Expected only resolvable cross-repo blocker in dependsOn, got {issue_a['dependsOn']}"
+        )
+    if any(dep.get("id") in {"issue-ambiguous", "missing-ghost"} for dep in issue_a["dependsOn"]):
+        raise AssertionError(f"Unresolvable blockers must be omitted, got {issue_a['dependsOn']}")
+    mounts = dependency_mounts_for_issue(repo1_wave1, issue_a)
+    if len(mounts) != 1 or mounts[0]["sandboxPath"] != "related-repos/repo2":
+        raise AssertionError(f"Expected single repo2 mount, got {mounts}")
+
+
+def test_sandcastle_runner_plan_dedups_same_cross_repo_blockers_in_depends_on(tmp, workspace_cli):
+    """Two different blockers in the same cross-repo dedupe to one dependsOn entry."""
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo1")
+    make_source_repo(tmp, "repo2")
+    run([str(workspace_cli), "create", "DEDUP", "--title", "Same-repo dedup", "--repo", "repo1"], env=env)
+    run([str(workspace_cli), "repo", "add", "DEDUP", "repo2"], env=env)
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "DEDUP",
+            "issue-b1",
+            "--title",
+            "First repo2 blocker",
+            "--repo",
+            "repo2",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "DEDUP",
+            "issue-b2",
+            "--title",
+            "Second repo2 blocker",
+            "--repo",
+            "repo2",
+        ],
+        env=env,
+    )
+    run(
+        [
+            str(workspace_cli),
+            "issue",
+            "create",
+            "DEDUP",
+            "issue-a",
+            "--title",
+            "Two blockers same cross-repo",
+            "--repo",
+            "repo1",
+            "--blocked-by",
+            "issue-b1",
+            "--blocked-by",
+            "issue-b2",
+        ],
+        env=env,
+    )
+    run([str(workspace_cli), "sandcastle", "plan", "DEDUP", "--json"], env=env)
+    fake = write_fake_sandcastle_command(tmp, tmp / "invoke.log")
+    run(
+        [str(workspace_cli), "sandcastle", "execute", "DEDUP", "--command", fake],
+        env=env,
+    )
+
+    repo1_wave1 = runner_plan_for(tmp, "DEDUP", wave=1, repo="repo1")
+    issue_a = next(item for item in repo1_wave1["issues"] if item["id"] == "issue-a")
+    expected_depends_on = [{"id": "issue-b1", "repo": "repo2"}]
+    if issue_a["dependsOn"] != expected_depends_on:
+        raise AssertionError(
+            f"Expected first cross-repo blocker only (deduped by repo), got {issue_a['dependsOn']}"
+        )
+    if len(issue_a["dependsOn"]) != 1:
+        raise AssertionError(f"Expected exactly one dependsOn entry, got {issue_a['dependsOn']}")
+    mounts = dependency_mounts_for_issue(repo1_wave1, issue_a)
+    if len(mounts) != 1 or mounts[0]["sandboxPath"] != "related-repos/repo2":
+        raise AssertionError(f"Expected single repo2 mount after dedup, got {mounts}")
+    if cross_repo_dep_repos(repo1_wave1) != ["repo2"]:
+        raise AssertionError(f"Expected one cross-repo mount target, got {cross_repo_dep_repos(repo1_wave1)}")
+
+
 def test_base_preserves_workspace_sandcastle_section(tmp):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, WORKSPACE_SANDCASTLE)
@@ -2459,6 +2863,12 @@ SANDCASTLE_TESTS = [
     test_sandcastle_execute_exit_zero_no_result_marks_failed,
     test_sandcastle_execute_partial_result_marks_uncovered_failed,
     test_sandcastle_execute_own_reconciliation_does_not_self_invalidate,
+    test_sandcastle_runner_plan_cross_repo_dependency,
+    test_sandcastle_runner_plan_same_repo_dependency_no_cross_repos,
+    test_sandcastle_runner_plan_three_repo_mount_selection,
+    test_sandcastle_runner_plan_depends_on_full_blocked_by_after_merge,
+    test_sandcastle_runner_plan_omits_unresolvable_blockers_from_depends_on,
+    test_sandcastle_runner_plan_dedups_same_cross_repo_blockers_in_depends_on,
     test_cleanup_plan_and_execution,
 ]
 

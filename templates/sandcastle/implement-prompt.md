@@ -13,6 +13,8 @@ Work only on branch `{{BRANCH}}`.
 
 Read the workspace spec and issue file before editing.
 
+If this issue depends on other repos, their read-only worktrees are available under `related-repos/<repo-name>/`.
+
 ## Issue Body
 
 {{ISSUE_BODY}}

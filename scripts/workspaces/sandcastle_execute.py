@@ -182,6 +182,153 @@ def dependency_map(payload):
     return deps
 
 
+def runner_repos(payload):
+    return [
+        {
+            "name": repo.get("name"),
+            "worktreePath": repo.get("worktreePath"),
+        }
+        for repo in payload.get("repos") or []
+        if repo.get("name")
+    ]
+
+
+def resolve_issue_depends_on(ledger, workspace_id, issue_id, own_repo_name, all_repos):
+    """Resolve an issue's full blockedBy list to cross-repo mount dependencies.
+
+    Uses live issue metadata (not the plan wave graph) so blockers already merged
+    in a prior execute wave are still included. Deduplication is by repo name
+    (first blocker wins); same-repo blockers and self-dependencies are excluded.
+    Unresolvable blockers are skipped.
+    """
+    index = issue_index(ledger, workspace_id)
+    issue = index.get(issue_id)
+    if not issue:
+        return []
+    own_repo = str(own_repo_name or "")
+    seen_repos = set()
+    depends_on = []
+    for blocker_id in issue["meta"].get("blockedBy") or []:
+        blocker_id = str(blocker_id)
+        if blocker_id == str(issue_id):
+            continue
+        blocker = index.get(blocker_id)
+        if not blocker:
+            continue
+        blocker_repo = resolve_issue_repo(blocker["meta"], all_repos)
+        if blocker_repo is None:
+            explicit = blocker["meta"].get("repo")
+            blocker_repo = str(explicit) if explicit is not None else None
+        if blocker_repo is None:
+            continue
+        blocker_repo = str(blocker_repo)
+        if blocker_repo == own_repo:
+            continue
+        if blocker_repo in seen_repos:
+            continue
+        seen_repos.add(blocker_repo)
+        depends_on.append({"id": blocker_id, "repo": blocker_repo})
+    return depends_on
+
+
+def dependency_mounts_for_issue(runner_plan, issue_record):
+    """Derive sandcastle docker() mounts from a runner plan issue (self-check mirror).
+
+    Mirrors templates/sandcastle/main.mts `buildDependencyMounts`. dependsOn is
+    deduped by repo when written; this function defensively dedupes again.
+    """
+    own_repo = str((runner_plan.get("repo") or {}).get("name") or "")
+    repos_by_name = {
+        str(repo.get("name") or ""): repo for repo in runner_plan.get("repos") or []
+    }
+    seen = set()
+    mounts = []
+    for dep in issue_record.get("dependsOn") or []:
+        repo_name = str(dep.get("repo") or "")
+        if not repo_name or repo_name == own_repo or repo_name in seen:
+            continue
+        seen.add(repo_name)
+        repo = repos_by_name.get(repo_name)
+        if not repo:
+            continue
+        worktree = repo.get("worktreePath")
+        if not worktree:
+            continue
+        mounts.append(
+            {
+                "hostPath": worktree,
+                "sandboxPath": f"related-repos/{repo_name}",
+                "readonly": True,
+            }
+        )
+    return mounts
+
+
+def runner_issue_record(ledger, workspace_id, issue_id, *, own_repo_name, all_repos):
+    index = issue_index(ledger, workspace_id)
+    issue = index.get(issue_id)
+    if not issue:
+        raise SystemExit(f"Issue not found while building runner plan: {issue_id}")
+    meta = issue["meta"]
+    return {
+        "id": meta.get("id"),
+        "title": meta.get("title"),
+        "branch": meta.get("branch"),
+        "body": issue["body"].strip(),
+        "path": str(issue["path"]),
+        "dependsOn": resolve_issue_depends_on(
+            ledger, workspace_id, issue_id, own_repo_name, all_repos
+        ),
+    }
+
+
+def write_runner_plan(
+    runs_dir,
+    payload,
+    *,
+    wave_number,
+    repo_name,
+    issue_ids,
+    ledger,
+    workspace_id,
+):
+    repos = repo_by_name(payload)
+    repo = repos.get(repo_name)
+    if not repo:
+        raise SystemExit(f"Sandcastle plan repo not found: {repo_name}")
+    all_repos = payload.get("repos") or []
+    workspace = payload.get("workspace") or {}
+    runner_plan = {
+        "workspace": {
+            "id": workspace.get("id"),
+            "title": workspace.get("title"),
+            "specPath": workspace.get("specPath"),
+        },
+        "repos": runner_repos(payload),
+        "repo": {
+            "name": repo.get("name"),
+            "worktreePath": repo.get("worktreePath"),
+            "branch": repo.get("branch"),
+        },
+        "issues": [
+            runner_issue_record(
+                ledger,
+                workspace_id,
+                issue_id,
+                own_repo_name=repo_name,
+                all_repos=all_repos,
+            )
+            for issue_id in issue_ids
+        ],
+    }
+    stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    plan_path = runs_dir / f"sandcastle-run-plan-w{wave_number}-{repo_name}-{stamp}.json"
+    result_path = runs_dir / f"sandcastle-run-result-w{wave_number}-{repo_name}-{stamp}.json"
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps(runner_plan, indent=2) + "\n", encoding="utf-8")
+    return plan_path, result_path
+
+
 def propagate_blocked_hitl(ledger, workspace_id, targeted_ids, depends_on, *, set_status):
     """Mark dependents blocked-hitl when a targeted blocker failed or is blocked-hitl."""
     index = issue_index(ledger, workspace_id)
@@ -223,57 +370,6 @@ def propagate_blocked_hitl(ledger, workspace_id, targeted_ids, depends_on, *, se
 
 def repo_by_name(payload):
     return {str(repo.get("name") or ""): repo for repo in payload.get("repos") or []}
-
-
-def runner_issue_record(ledger, workspace_id, issue_id):
-    index = issue_index(ledger, workspace_id)
-    issue = index.get(issue_id)
-    if not issue:
-        raise SystemExit(f"Issue not found while building runner plan: {issue_id}")
-    meta = issue["meta"]
-    return {
-        "id": meta.get("id"),
-        "title": meta.get("title"),
-        "branch": meta.get("branch"),
-        "body": issue["body"].strip(),
-        "path": str(issue["path"]),
-    }
-
-
-def write_runner_plan(
-    runs_dir,
-    payload,
-    *,
-    wave_number,
-    repo_name,
-    issue_ids,
-    ledger,
-    workspace_id,
-):
-    repos = repo_by_name(payload)
-    repo = repos.get(repo_name)
-    if not repo:
-        raise SystemExit(f"Sandcastle plan repo not found: {repo_name}")
-    workspace = payload.get("workspace") or {}
-    runner_plan = {
-        "workspace": {
-            "id": workspace.get("id"),
-            "title": workspace.get("title"),
-            "specPath": workspace.get("specPath"),
-        },
-        "repo": {
-            "name": repo.get("name"),
-            "worktreePath": repo.get("worktreePath"),
-            "branch": repo.get("branch"),
-        },
-        "issues": [runner_issue_record(ledger, workspace_id, issue_id) for issue_id in issue_ids],
-    }
-    stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    plan_path = runs_dir / f"sandcastle-run-plan-w{wave_number}-{repo_name}-{stamp}.json"
-    result_path = runs_dir / f"sandcastle-run-result-w{wave_number}-{repo_name}-{stamp}.json"
-    plan_path.parent.mkdir(parents=True, exist_ok=True)
-    plan_path.write_text(json.dumps(runner_plan, indent=2) + "\n", encoding="utf-8")
-    return plan_path, result_path
 
 
 def wave_issues_by_repo(wave, *, skip_ids):

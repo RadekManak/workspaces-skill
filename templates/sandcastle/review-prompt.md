@@ -11,6 +11,8 @@ Review branch `{{BRANCH}}` against the workspace spec and issue acceptance crite
 - Workspace spec path: `{{WORKSPACE_SPEC_PATH}}`
 - Issue path: `{{ISSUE_PATH}}`
 
+If this issue depends on other repos, their read-only worktrees are available under `related-repos/<repo-name>/`.
+
 ## Issue Body
 
 {{ISSUE_BODY}}
