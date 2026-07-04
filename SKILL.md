@@ -144,7 +144,7 @@ When the task is scoped enough for an agent to start without re-asking basics, s
 
 Local workspace issues live in `issues/*.md` under the workspace ledger. They are the execution contract for implementation work and do not need to be GitHub issues.
 
-Use `issue create` to write issues with YAML frontmatter. Each issue tracks an id, title, status, blockers (`blocked-by`), branch, acceptance criteria, and body.
+Use `issue create` to write issues with YAML frontmatter. Each issue tracks an id, title, status, blockers (`blocked-by`), and branch in the frontmatter; acceptance criteria and body text live in the markdown body, not the frontmatter.
 
 Use `issue ready` to find dependency-ready work whose blockers are satisfied.
 

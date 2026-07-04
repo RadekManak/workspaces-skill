@@ -192,7 +192,3 @@ scripts/self_check.py
 - Normal list/status uses local files and local git only.
 - Jira and GitHub sync are explicit.
 - Closing a workspace does not delete worktrees.
-
-## Remaining Work
-
-Follow-up implementation issues are in `docs/issues/`.

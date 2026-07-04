@@ -167,7 +167,6 @@ def planning_fingerprint(repos, targeted_entries):
 
 
 def targeted_entry_from_issue(issue, repo):
-    meta = issue["meta"]
     payload = issue_payload(issue)
     payload["repo"] = repo
     return payload

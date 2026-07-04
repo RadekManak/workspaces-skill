@@ -1,6 +1,5 @@
 """Shared CLI command implementations for workspace entrypoints."""
 import argparse
-import datetime as dt
 import json
 import os
 import re
@@ -69,10 +68,6 @@ def ledger_dir(config, workspace_id):
     return Path(config["ledger_root"]) / "workspaces" / workspace_id
 
 
-def workspace_yaml_path(config, workspace_id):
-    return ledger_dir(config, workspace_id) / "workspace.yaml"
-
-
 def workspace_root_path(config, workspace_id):
     return Path(config["workspace_root"]) / workspace_id
 
@@ -91,10 +86,6 @@ def issue_path(config, workspace_id, issue_id):
 
 def runs_dir(config, workspace_id):
     return ledger_dir(config, workspace_id) / "runs"
-
-
-def cleanup_runs_dir(config):
-    return Path(config["ledger_root"]) / "runs"
 
 
 def load_workspace(config, workspace_id):
@@ -470,10 +461,6 @@ def workspace_cleanup_candidates(config, workspace_ids):
 
 def print_workspace_cleanup_plan(candidates):
     cleanup_safety({}).print_workspace_plan(candidates)
-
-
-def cleanup_plan_snapshot(candidate):
-    return cleanup_safety({}).snapshot(candidate)
 
 
 def write_cleanup_plan(config, candidates):
@@ -1638,7 +1625,11 @@ def build_parser(*, sandcastle=False, prog=None):
         p = sandcastle_sub.add_parser("plan", help="Plan dependency-ordered Sandcastle execution")
         p.add_argument("id")
         p.add_argument("--repo", help="Limit planning to one workspace repo")
-        p.add_argument("--limit", type=int, help="Limit targeted AFK issues")
+        p.add_argument(
+            "--limit",
+            type=int,
+            help="Cap the seed selection of ready AFK issues (dependency closure may still add more to the locked scope)",
+        )
         p.add_argument("--json", action="store_true")
         p.set_defaults(func=cmd_sandcastle_plan)
 

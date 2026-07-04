@@ -22,12 +22,13 @@ from workspaces.git import branch_exists
 from workspaces.sandcastle_execute import dependency_mounts_for_issue
 
 
-def run(cmd, *, env=None, cwd=None, check=True):
+def run(cmd, *, env=None, cwd=None, check=True, input=None):
     proc = subprocess.run(
         cmd,
         cwd=cwd,
         env=env,
         text=True,
+        input=input,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -263,6 +264,154 @@ def test_repo_crud_and_pr_lifecycle(tmp, workspace_cli):
     data = read_yaml(tmp / "ledger" / "workspaces" / "TASK-CRUD" / "workspace.yaml")
     if data["state"] != "review-feedback" or not data["links"]["githubPrs"]:
         raise AssertionError(f"Expected PR lifecycle metadata, got {data}")
+
+
+def init_bare_git_repo(path):
+    run(["git", "-C", str(path), "init", "-b", "main"])
+    run(["git", "-C", str(path), "config", "user.email", "test@example.com"])
+    run(["git", "-C", str(path), "config", "user.name", "Test User"])
+    (path / "README.md").write_text("hello\n", encoding="utf-8")
+    run(["git", "-C", str(path), "add", "README.md"])
+    run(["git", "-C", str(path), "commit", "-m", "init"])
+
+
+def test_adopt_external_worktree_pointer_and_doctor(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+
+    external_repo = tmp / "external-repo"
+    external_repo.mkdir()
+    init_bare_git_repo(external_repo)
+
+    run([str(workspace_cli), "adopt", str(external_repo), "--id", "EXT-ADOPT"], env=env)
+
+    ws_root = tmp / "workspaces" / "EXT-ADOPT"
+    pointer = ws_root / ".workspace-id"
+    assert_path(pointer)
+    if pointer.read_text(encoding="utf-8").strip() != "EXT-ADOPT":
+        raise AssertionError(f"Expected workspace pointer to hold adopted id, got: {pointer.read_text()!r}")
+
+    pointer_in_repo = external_repo / ".workspace-id"
+    if pointer_in_repo.exists():
+        raise AssertionError(
+            ".workspace-id should not be written into the adopted repo path itself "
+            f"when it lives outside workspace_root/<id>/: {pointer_in_repo}"
+        )
+
+    doctor = json.loads(run([str(workspace_cli), "doctor", "EXT-ADOPT", "--json"], env=env).stdout)
+    codes = [issue["code"] for issue in doctor["issues"]]
+    if "workspace-pointer" in codes:
+        raise AssertionError(f"doctor should not warn about workspace pointer right after adopt, got: {doctor}")
+
+
+def test_list_json_and_ids_only_flags(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    run([str(workspace_cli), "create", "LIST-ALPHA", "--title", "Alpha", "--state", "in-progress"], env=env)
+    run([str(workspace_cli), "create", "LIST-BETA", "--title", "Beta", "--state", "in-progress"], env=env)
+    run([str(workspace_cli), "create", "LIST-GAMMA", "--title", "Gamma", "--state", "closed"], env=env)
+
+    all_ids = run([str(workspace_cli), "list", "--ids-only", "--all"], env=env).stdout
+    lines = all_ids.strip().splitlines()
+    if set(lines) != {"LIST-ALPHA", "LIST-BETA", "LIST-GAMMA"}:
+        raise AssertionError(f"Unexpected --ids-only --all output: {lines}")
+    assert_not_contains(all_ids, "ID")
+    assert_not_contains(all_ids, "Workspaces")
+    assert_not_contains(all_ids, "STATE")
+
+    active_ids = run([str(workspace_cli), "list", "--ids-only"], env=env).stdout.strip().splitlines()
+    if set(active_ids) != {"LIST-ALPHA", "LIST-BETA"}:
+        raise AssertionError(f"Expected closed workspace excluded from default --ids-only scope, got {active_ids}")
+
+    closed_ids = run([str(workspace_cli), "list", "--ids-only", "--state", "closed"], env=env).stdout.strip().splitlines()
+    if closed_ids != ["LIST-GAMMA"]:
+        raise AssertionError(f"Expected only the closed workspace, got {closed_ids}")
+
+    empty_ids_only = run([str(workspace_cli), "list", "--ids-only", "--state", "nonexistent"], env=env).stdout
+    if empty_ids_only != "":
+        raise AssertionError(f"Expected empty output for --ids-only with no matches, got {empty_ids_only!r}")
+
+    json_rows = json.loads(run([str(workspace_cli), "list", "--json", "--all"], env=env).stdout)
+    if len(json_rows) != 3:
+        raise AssertionError(f"Expected 3 rows for --json --all, got {json_rows}")
+    required_keys = {"id", "state", "updated", "repos", "local", "prs", "title"}
+    for row in json_rows:
+        if not required_keys.issubset(row.keys()):
+            raise AssertionError(f"Missing keys in list --json row: {row}")
+
+    active_json_ids = {row["id"] for row in json.loads(run([str(workspace_cli), "list", "--json"], env=env).stdout)}
+    if active_json_ids != {"LIST-ALPHA", "LIST-BETA"}:
+        raise AssertionError(f"Expected closed workspace excluded from default --json scope, got {active_json_ids}")
+
+    closed_json = json.loads(run([str(workspace_cli), "list", "--json", "--state", "closed"], env=env).stdout)
+    if len(closed_json) != 1 or closed_json[0]["id"] != "LIST-GAMMA":
+        raise AssertionError(f"Expected only the closed workspace in --json --state closed, got {closed_json}")
+
+    empty_json = json.loads(run([str(workspace_cli), "list", "--json", "--state", "nonexistent"], env=env).stdout)
+    if empty_json != []:
+        raise AssertionError(f"Expected empty list for nonexistent state, got {empty_json}")
+
+    error_proc = run([str(workspace_cli), "list", "--json", "--ids-only"], env=env, check=False)
+    if error_proc.returncode == 0:
+        raise AssertionError("Expected --json/--ids-only combination to fail")
+    assert_contains(error_proc.stderr, "mutually exclusive")
+
+
+def test_init_config_prompts_and_force_overwrite(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = {**os.environ, "WORKSPACES_CONFIG": str(config_path)}
+
+    prompt_result = run([str(workspace_cli), "init-config"], env=env, input="\n\n")
+    assert_contains(prompt_result.stdout, "[~/git]")
+    assert_contains(prompt_result.stdout, "[~/workspaces]")
+    data = read_yaml(config_path)
+    if data["source_root"] != "~/git" or data["workspace_root"] != "~/workspaces":
+        raise AssertionError(f"Expected template defaults accepted via blank input, got {data}")
+    if data["ledger_root"] != "~/workspaces/_ledger":
+        raise AssertionError(f"Expected ledger_root derived from workspace_root, got {data}")
+    for key in ("base_remote", "base_branch", "push_remote", "jira_base_url", "github_host", "editor_command"):
+        if key not in data:
+            raise AssertionError(f"Expected template key {key!r} preserved, got {data}")
+
+    config_path.unlink()
+    custom_source = tmp / "custom-src"
+    custom_source.mkdir()
+    custom_workspace = tmp / "custom-ws"
+    run(
+        [str(workspace_cli), "init-config"],
+        env=env,
+        input=f"{custom_source}\n{custom_workspace}\n",
+    )
+    data = read_yaml(config_path)
+    if data["source_root"] != str(custom_source):
+        raise AssertionError(f"Expected custom source_root honored, got {data}")
+    if data["workspace_root"] != str(custom_workspace):
+        raise AssertionError(f"Expected custom workspace_root honored, got {data}")
+    if data["ledger_root"] != f"{custom_workspace}/_ledger":
+        raise AssertionError(f"Expected ledger_root derived from custom workspace_root, got {data}")
+
+    config_path.unlink()
+    missing_source = tmp / "does-not-exist"
+    warn_result = run(
+        [str(workspace_cli), "init-config"],
+        env=env,
+        input=f"{missing_source}\n\n",
+    )
+    assert_contains(warn_result.stderr, "Warning")
+    assert_contains(warn_result.stderr, str(missing_source))
+    assert_path(config_path)
+
+    config_path.write_text("existing: true\n", encoding="utf-8")
+    refused = run([str(workspace_cli), "init-config", "--non-interactive"], env=env)
+    assert_contains(refused.stdout, "already exists")
+    data = read_yaml(config_path)
+    if data != {"existing": True}:
+        raise AssertionError(f"Expected init-config without --force to leave existing config untouched, got {data}")
+
+    run([str(workspace_cli), "init-config", "--non-interactive", "--force"], env=env)
+    data = read_yaml(config_path)
+    if "existing" in data or data.get("source_root") != "~/git":
+        raise AssertionError(f"Expected --force to overwrite with template defaults, got {data}")
 
 
 def test_issue_graph_and_user_review(tmp, workspace_cli):
@@ -2540,6 +2689,42 @@ def test_cli_split_help_and_restrictions(tmp):
         raise AssertionError("Expected base CLI to reject issue create --type")
 
 
+def test_makefile_install_produces_sibling_skill_layout(tmp):
+    fake_home = tmp / "home"
+    fake_home.mkdir()
+    run(["make", "install"], cwd=str(ROOT), env={**os.environ, "HOME": str(fake_home)})
+
+    skills = fake_home / ".agents" / "skills"
+    base_skill_md = skills / "workspaces" / "SKILL.md"
+    assert_path(base_skill_md)
+
+    sandcastle_dir = skills / "workspaces-with-sandcastle"
+    if not sandcastle_dir.is_symlink():
+        raise AssertionError(
+            f"Expected {sandcastle_dir} to be a symlink to a sibling of the workspaces "
+            f"install's scripts, so it is independently loadable while ../scripts/ still resolves"
+        )
+
+    sandcastle_skill_md = sandcastle_dir / "SKILL.md"
+    assert_path(sandcastle_skill_md)
+    expected_skill_md = skills / "workspaces" / "workspaces-with-sandcastle" / "SKILL.md"
+    if sandcastle_skill_md.resolve() != expected_skill_md.resolve():
+        raise AssertionError(
+            f"Sandcastle SKILL.md should resolve into the workspaces install, "
+            f"got {sandcastle_skill_md.resolve()} expected {expected_skill_md.resolve()}"
+        )
+
+    sandcastle_script = sandcastle_dir / ".." / "scripts" / "workspace_with_sandcastle.py"
+    assert_path(sandcastle_script)
+    expected_script = skills / "workspaces" / "scripts" / "workspace_with_sandcastle.py"
+    if sandcastle_script.resolve() != expected_script.resolve():
+        raise AssertionError(
+            f"../scripts/ from inside the sandcastle skill dir should resolve to the "
+            f"workspaces install's scripts, got {sandcastle_script.resolve()} "
+            f"expected {expected_script.resolve()}"
+        )
+
+
 def test_base_issue_create_omits_sandcastle_fields(tmp):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, WORKSPACE)
@@ -2827,6 +3012,9 @@ def test_mixed_state_sandcastle_block_preserved_and_idempotent(tmp):
 BASE_TESTS = [
     test_config_and_ledger_workspace,
     test_worktree_adopt_status_note_close,
+    test_adopt_external_worktree_pointer_and_doctor,
+    test_list_json_and_ids_only_flags,
+    test_init_config_prompts_and_force_overwrite,
     test_issue_graph_and_user_review,
     test_repo_crud_and_pr_lifecycle,
     test_workspace_cleanup_plan_and_execution,
@@ -2874,6 +3062,7 @@ SANDCASTLE_TESTS = [
 
 CLI_SPLIT_TESTS = [
     test_cli_split_help_and_restrictions,
+    test_makefile_install_produces_sibling_skill_layout,
     test_topology_commands_print_vscode_json,
     test_base_issue_create_omits_sandcastle_fields,
     test_issue_create_default_repo_single_repo_workspace,
