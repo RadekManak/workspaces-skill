@@ -19,6 +19,7 @@ WORKSPACE_SANDCASTLE = ROOT / "scripts" / "workspace_with_sandcastle.py"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from workspaces import doctor
+from workspaces import github_sync
 from workspaces import repo
 from workspaces.common import DEFAULT_CONFIG
 from workspaces.git import branch_exists
@@ -3223,6 +3224,55 @@ def test_repo_refresh_repo_updates_git_metadata():
             raise AssertionError(f"Expected refresh_repo to preserve base/push remote config, got {refreshed}")
 
 
+def test_github_sync_apply_pr_event_maps_state_and_records_pr():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+
+        workspace = ledger.ensure("GH-OPEN", title="GitHub sync opened test")
+        github_sync.apply_pr_event(workspace, "opened", url="https://github.com/x/y/pull/1", number=1)
+        if workspace.state != "pr-review":
+            raise AssertionError(f"Expected 'opened' event to set state to 'pr-review', got {workspace.state}")
+        prs = workspace.github_prs
+        if len(prs) != 1 or prs[0].get("number") != 1 or prs[0].get("merged"):
+            raise AssertionError(f"Expected a single unmerged PR#1 recorded, got {prs}")
+
+        workspace = ledger.ensure("GH-MERGED", title="GitHub sync merged test")
+        github_sync.apply_pr_event(workspace, "merged", url="https://github.com/x/y/pull/2", number=2)
+        if workspace.state != "dev-complete":
+            raise AssertionError(f"Expected 'merged' event to set state to 'dev-complete', got {workspace.state}")
+        prs = workspace.github_prs
+        if len(prs) != 1 or prs[0].get("number") != 2 or not prs[0].get("merged"):
+            raise AssertionError(f"Expected a single merged PR#2 recorded, got {prs}")
+
+        workspace = ledger.ensure("GH-FEEDBACK", title="GitHub sync feedback test")
+        github_sync.apply_pr_event(workspace, "feedback")
+        if workspace.state != "review-feedback":
+            raise AssertionError(f"Expected 'feedback' event to set state to 'review-feedback', got {workspace.state}")
+        if workspace.github_prs:
+            raise AssertionError(f"Expected no PR entry when url/number omitted, got {workspace.github_prs}")
+
+
+def test_github_sync_sync_prs_raises_when_gh_missing():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("GH-NO-CLI", title="GitHub sync missing gh test")
+
+        original_which = github_sync.shutil.which
+        github_sync.shutil.which = lambda *args, **kwargs: None
+        try:
+            try:
+                github_sync.sync_prs(config, workspace)
+                raise AssertionError("Expected sync_prs to raise SystemExit when gh is missing from PATH")
+            except SystemExit:
+                pass
+        finally:
+            github_sync.shutil.which = original_which
+
+
 WORKSPACE_MODEL_TESTS = [
     test_workspace_model_state_roundtrip,
     test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
@@ -3238,6 +3288,8 @@ WORKSPACE_MODEL_TESTS = [
     test_repo_select_repo_single_and_multi_and_named,
     test_repo_add_source_repo_creates_worktree_and_upserts,
     test_repo_refresh_repo_updates_git_metadata,
+    test_github_sync_apply_pr_event_maps_state_and_records_pr,
+    test_github_sync_sync_prs_raises_when_gh_missing,
 ]
 
 

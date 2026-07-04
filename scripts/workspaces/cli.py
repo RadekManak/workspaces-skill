@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from workspaces import doctor
+from workspaces import github_sync
 from workspaces import issues as issue_model
 from workspaces.cleanup import CleanupSafety
 from workspaces.common import (
@@ -21,12 +22,9 @@ from workspaces.common import (
     SKILL_ROOT,
     STATE_ORDER,
     expand,
-    now,
     read_yaml,
-    run,
 )
 from workspaces.git import (
-    github_repo_from_remote,
     git_info,
 )
 from workspaces.issues import (
@@ -1125,54 +1123,8 @@ def cmd_cleanup(args):
 
 def cmd_sync_github(args):
     config = load_config()
-    if shutil.which("gh") is None:
-        raise SystemExit("gh is not installed or not on PATH")
     workspace = load_workspace(config, args.id)
-    seen = []
-    for repo in workspace.repos:
-        path = repo.get("worktreePath")
-        if not path or not Path(path).exists():
-            continue
-        info = git_info(path, config)
-        branch = info["branch"]
-        remote = info["remote"]
-        full_name = github_repo_from_remote(remote or "")
-        if not branch or not full_name:
-            continue
-        raw = run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                full_name,
-                "--head",
-                branch,
-                "--json",
-                "number,url,state,isDraft,headRefName,baseRefName,mergedAt,title",
-                "--limit",
-                "10",
-            ],
-            check=False,
-        )
-        try:
-            prs = json.loads(raw) if raw else []
-        except json.JSONDecodeError:
-            prs = []
-        for pr in prs:
-            item = {
-                "repo": repo.get("name"),
-                "number": pr.get("number"),
-                "url": pr.get("url"),
-                "branch": pr.get("headRefName") or branch,
-                "state": pr.get("state"),
-                "merged": bool(pr.get("mergedAt")),
-                "lastSeenAt": now(),
-                "title": pr.get("title"),
-            }
-            seen.append(item)
-    for item in seen:
-        workspace.record_github_pr(item)
+    seen = github_sync.sync_prs(config, workspace)
     save_workspace(config, workspace)
     append_note(config, args.id, f"Synced GitHub PR snapshots. Found {len(seen)} PR(s).")
     print(f"Found {len(seen)} PR(s).")
@@ -1181,21 +1133,7 @@ def cmd_sync_github(args):
 def cmd_pr(args):
     config = load_config()
     workspace = load_workspace(config, args.id)
-    state_by_event = {
-        "opened": "pr-review",
-        "feedback": "review-feedback",
-        "merged": "dev-complete",
-    }
-    workspace.set_state(state_by_event[args.event])
-    if args.url or args.number:
-        item = {
-            "url": args.url,
-            "number": args.number,
-            "state": "MERGED" if args.event == "merged" else "OPEN",
-            "merged": args.event == "merged",
-            "lastSeenAt": now(),
-        }
-        workspace.append_github_pr({key: value for key, value in item.items() if value is not None})
+    github_sync.apply_pr_event(workspace, args.event, url=args.url, number=args.number)
     save_workspace(config, workspace)
     note = args.note or f"PR lifecycle event `{args.event}` set workspace state to `{workspace.state}`."
     append_note(config, args.id, note)
