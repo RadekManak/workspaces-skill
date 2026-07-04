@@ -152,12 +152,21 @@ def normalize_issue_meta(ledger, workspace_id, issue_id, meta, *, sandcastle=Fal
     return normalized
 
 
-def write_issue(ledger, workspace_id, issue_id, meta, body, *, sandcastle=False):
+def write_issue(ledger, workspace_id, issue_id, meta, body, *, sandcastle=False, skip_plan_invalidation=False):
+    path = ledger.issue_path(workspace_id, issue_id)
+    old_meta = None
+    if path.exists():
+        old_meta = read_issue(path)["meta"]
     meta = normalize_issue_meta(ledger, workspace_id, issue_id, meta, sandcastle=sandcastle)
-    path = ledger.issue_path(workspace_id, meta["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     frontmatter = yaml.safe_dump(meta, sort_keys=False, allow_unicode=False).strip()
     path.write_text(f"---\n{frontmatter}\n---\n{body.strip()}\n", encoding="utf-8")
+    if old_meta is not None and not skip_plan_invalidation:
+        from .sandcastle_state import maybe_invalidate_plan_for_issue_edit
+
+        maybe_invalidate_plan_for_issue_edit(
+            ledger, workspace_id, meta["id"], old_meta, meta
+        )
     return path, meta
 
 
@@ -250,6 +259,7 @@ def set_issue_status(
     extra=None,
     *,
     sandcastle=False,
+    skip_plan_invalidation=False,
 ):
     path = ledger.issue_path(workspace_id, issue_id)
     if not path.exists():
@@ -270,7 +280,13 @@ def set_issue_status(
     for key, value in (extra or {}).items():
         meta[key] = value
     path, meta = write_issue(
-        ledger, workspace_id, issue_id, meta, issue["body"], sandcastle=sandcastle
+        ledger,
+        workspace_id,
+        issue_id,
+        meta,
+        issue["body"],
+        sandcastle=sandcastle,
+        skip_plan_invalidation=skip_plan_invalidation,
     )
     return path, meta, old_status
 

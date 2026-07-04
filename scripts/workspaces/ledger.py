@@ -1,4 +1,5 @@
 import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -53,6 +54,92 @@ class WorkspaceLedger:
             return True
         return True
 
+    def acquire_sandcastle_lock(self, workspace_id, payload):
+        path = self.sandcastle_lock_path(workspace_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock = {
+            "workspace": workspace_id,
+            "createdAt": now(),
+            "pid": os.getpid(),
+            "planPath": payload.get("planPath"),
+            "targetedIssueIds": payload.get("targetedIssueIds"),
+        }
+        # A lock file surviving a crash/kill -9/OOM/reboot must not permanently
+        # deadlock the workspace: if the PID inside it is dead, remove the stale
+        # file and retry once (still via O_EXCL, so a genuinely concurrent
+        # acquirer that wins the retry race still correctly wins the lock).
+        for attempt in range(2):
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError as error:
+                if attempt == 0 and self._recover_dead_sandcastle_lock(workspace_id, path):
+                    continue
+                raise SystemExit(f"Sandcastle run already active: {path}") from error
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(lock, handle, indent=2)
+                handle.write("\n")
+            return path
+        raise SystemExit(f"Sandcastle run already active: {path}")
+
+    def _recover_dead_sandcastle_lock(self, workspace_id, path):
+        """Remove `path` iff it's still a dead-PID lock, but only after winning a
+        secondary "recovery" lock that serializes concurrent recovery attempts.
+
+        Without this, two processes that both observe the same dead lock could each
+        decide independently to recover it: whichever unlinks second would actually be
+        deleting the OTHER process's freshly-created, live lock (not the original dead
+        one it itself observed), letting both believe they hold the workspace's run
+        lock -- so "check dead, then unlink" must never happen concurrently for the
+        same lock.
+
+        The recovery lock itself must be *unconditionally* crash-recoverable: an
+        earlier version of this used a second `O_CREAT|O_EXCL` marker file, but that
+        file carried no PID/ownership info, so a process that crashed while holding it
+        left an orphaned marker with no way to tell "someone is legitimately recovering
+        right now" from "a dead process left this behind" -- permanently deadlocking
+        every future recovery attempt (exactly the class of bug this whole mechanism
+        exists to prevent, just moved one file over). Re-deriving a second PID-based
+        check-then-act recovery layer for *that* marker would just reintroduce the same
+        TOCTOU race one level up, recursively. Using `flock()` instead sidesteps the
+        whole problem: it is a kernel-mediated mutex tied to the open file descriptor,
+        so at most one process can ever hold it at a time (real mutual exclusion, not a
+        userspace check-then-act pattern), AND the kernel unconditionally releases it
+        when the holding descriptor is closed for any reason -- including the holding
+        process crashing, being `kill -9`'d, OOM-killed, or the machine rebooting --
+        so there is no file-content/ownership state that can ever be left "orphaned."
+        """
+        recovery_path = path.with_name(path.name + ".recovery-lock")
+        fd = os.open(recovery_path, os.O_CREAT | os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Someone else is actively recovering this exact lock right now;
+                # don't race them for it.
+                return False
+            # Re-check liveness now, inside the critical section: another process may
+            # have already recovered and replaced `path` with its own live lock while
+            # this process was waiting to acquire the flock above.
+            if self.sandcastle_run_active(workspace_id):
+                return False
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return True
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+    def release_sandcastle_lock(self, path):
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+
     def cleanup_runs_dir(self):
         return Path(self.config["ledger_root"]) / "runs"
 
@@ -72,6 +159,11 @@ class WorkspaceLedger:
                 yield data
 
     def save(self, data):
+        workspace_id = data["id"]
+        old_data = None
+        path = self.workspace_yaml_path(workspace_id)
+        if path.exists():
+            old_data = read_yaml(path)
         data["updatedAt"] = now()
         if data.get("cleanupStatus") == "done":
             old_path = data.get("vscodeWorkspacePath")
@@ -80,7 +172,11 @@ class WorkspaceLedger:
             data.pop("vscodeWorkspacePath", None)
         else:
             data["vscodeWorkspacePath"] = str(self.write_vscode_workspace(data))
-        write_yaml(self.workspace_yaml_path(data["id"]), data)
+        write_yaml(path, data)
+        if old_data is not None:
+            from .sandcastle_state import maybe_invalidate_plan_for_repo_change
+
+            maybe_invalidate_plan_for_repo_change(self, workspace_id, old_data, data)
 
     def build_vscode_workspace(self, data):
         workspace_id = data["id"]

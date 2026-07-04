@@ -37,6 +37,7 @@ from workspaces.issues import (
     default_issue_repo,
     sandcastle_issue_meta,
 )
+from workspaces.sandcastle_execute import execute_plan, format_execute_summary, resolve_execution_plan
 from workspaces.sandcastle_plan import plan_workspace, select_plan_repos
 from workspaces.ledger import WorkspaceLedger
 
@@ -147,9 +148,15 @@ def issue_body_from_args(args):
     return issue_model.issue_body_from_args(args)
 
 
-def write_issue(config, workspace_id, issue_id, meta, body, *, sandcastle=False):
+def write_issue(config, workspace_id, issue_id, meta, body, *, sandcastle=False, skip_plan_invalidation=False):
     return issue_model.write_issue(
-        WorkspaceLedger(config), workspace_id, issue_id, meta, body, sandcastle=sandcastle
+        WorkspaceLedger(config),
+        workspace_id,
+        issue_id,
+        meta,
+        body,
+        sandcastle=sandcastle,
+        skip_plan_invalidation=skip_plan_invalidation,
     )
 
 
@@ -262,6 +269,70 @@ def cmd_sandcastle_reconcile_result(args):
     print(f"Reconciled {len(applied)} issue update(s).")
 
 
+def cmd_sandcastle_execute(args):
+    config = load_config()
+    if not args.command:
+        raise SystemExit("--command is required")
+    workspace_id = args.id
+    data = load_workspace(config, workspace_id)
+    ledger = WorkspaceLedger(config)
+    plan_path, payload = resolve_execution_plan(
+        ledger,
+        workspace_id,
+        data,
+        explicit_plan=args.plan,
+    )
+
+    def set_status_cb(ws_id, issue_id, status, **kwargs):
+        set_issue_status(
+            config,
+            ws_id,
+            issue_id,
+            status,
+            review_status=kwargs.get("review_status"),
+            branch=kwargs.get("branch"),
+            extra=kwargs.get("extra"),
+            sandcastle=True,
+        )
+
+    def apply_result_cb(ws_id, result_path):
+        # This is execute's own result reconciliation, not an external edit -- it must
+        # not self-trigger the eager "plan invalidated" hook (e.g. a runner reporting a
+        # normal reviewStatus change on a targeted issue would otherwise spuriously
+        # invalidate the very plan this run is executing and pollute notes.md).
+        apply_sandcastle_result(config, ws_id, result_path, skip_plan_invalidation=True)
+
+    def append_note_cb(ws_id, text):
+        append_note(config, ws_id, text)
+
+    def save_workspace_cb(ws_data):
+        save_workspace(config, ws_data)
+
+    def load_workspace_cb(ws_id):
+        return load_workspace(config, ws_id)
+
+    result = execute_plan(
+        config,
+        data,
+        workspace_id,
+        plan_path,
+        payload,
+        command=args.command,
+        set_status=set_status_cb,
+        apply_result=apply_result_cb,
+        append_note=append_note_cb,
+        save_workspace=save_workspace_cb,
+        load_workspace=load_workspace_cb,
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(format_execute_summary(result))
+        print(json.dumps(result, indent=2))
+    if result.get("outcome") == "completed-with-failures":
+        raise SystemExit(1)
+
+
 def set_issue_status(
     config,
     workspace_id,
@@ -272,6 +343,7 @@ def set_issue_status(
     extra=None,
     *,
     sandcastle=False,
+    skip_plan_invalidation=False,
 ):
     return issue_model.set_issue_status(
         WorkspaceLedger(config),
@@ -282,6 +354,7 @@ def set_issue_status(
         branch=branch,
         extra=extra,
         sandcastle=sandcastle,
+        skip_plan_invalidation=skip_plan_invalidation,
     )
 
 
@@ -289,7 +362,7 @@ def maybe_mark_user_review(config, workspace_id):
     return issue_model.maybe_mark_user_review(WorkspaceLedger(config), workspace_id)
 
 
-def apply_sandcastle_result(config, workspace_id, result_path):
+def apply_sandcastle_result(config, workspace_id, result_path, *, skip_plan_invalidation=False):
     path = Path(result_path).expanduser()
     if not path.exists():
         raise SystemExit(f"Sandcastle result not found: {path}")
@@ -300,41 +373,66 @@ def apply_sandcastle_result(config, workspace_id, result_path):
         raise SystemExit("Sandcastle result field `issues` must be a list")
 
     applied = []
-    for update in updates:
-        if not isinstance(update, dict):
-            raise SystemExit("Each Sandcastle issue result must be an object")
-        issue_id = update.get("id")
-        status = update.get("status")
-        if not issue_id or not status:
-            raise SystemExit("Each Sandcastle issue result needs `id` and `status`")
-        extra = {
-            key: value
-            for key, value in update.items()
-            if key not in {"id", "status", "reviewStatus", "branch", "note"}
-        }
-        issue_path_, meta, old_status = set_issue_status(
-            config,
-            workspace_id,
-            str(issue_id),
-            str(status),
-            review_status=update.get("reviewStatus"),
-            branch=update.get("branch"),
-            extra=extra,
-            sandcastle=True,
-        )
-        applied.append((meta, old_status, update.get("note"), issue_path_))
+    failures = []
+    # Each entry is applied independently: one malformed/unknown-id entry must not
+    # discard legitimately-successful entries listed after it in the same result
+    # file (a runner reporting N issues shouldn't have N-1 of them silently lost,
+    # and then incorrectly marked `failed` by execute's stuck-"running" backstop,
+    # just because one unrelated entry in the same JSON list was bad).
+    for index, update in enumerate(updates):
+        try:
+            if not isinstance(update, dict):
+                raise SystemExit(f"Sandcastle result entry {index} must be an object")
+            issue_id = update.get("id")
+            status = update.get("status")
+            if not issue_id or not status:
+                raise SystemExit(f"Sandcastle result entry {index} needs `id` and `status`")
+            extra = {
+                key: value
+                for key, value in update.items()
+                if key not in {"id", "status", "reviewStatus", "branch", "note"}
+            }
+            issue_path_, meta, old_status = set_issue_status(
+                config,
+                workspace_id,
+                str(issue_id),
+                str(status),
+                review_status=update.get("reviewStatus"),
+                branch=update.get("branch"),
+                extra=extra,
+                sandcastle=True,
+                skip_plan_invalidation=skip_plan_invalidation,
+            )
+            applied.append((meta, old_status, update.get("note"), issue_path_))
+        except (Exception, SystemExit) as error:  # noqa: BLE001 - isolate per entry
+            failures.append((index, update, error))
 
     data = load_workspace(config, workspace_id)
     save_workspace(config, data)
-    append_note(
-        config,
-        workspace_id,
-        f"Reconciled Sandcastle result `{path}` with {len(applied)} issue update(s).",
-    )
+    summary = f"Reconciled Sandcastle result `{path}` with {len(applied)} issue update(s)"
+    if failures:
+        summary += f", {len(failures)} entr{'y' if len(failures) == 1 else 'ies'} failed to apply"
+    append_note(config, workspace_id, summary + ".")
     for meta, old_status, note, _ in applied:
         detail = note or f"Issue `{meta['id']}` status changed from `{old_status}` to `{meta['status']}`."
         append_note(config, workspace_id, detail)
+    for index, update, error in failures:
+        entry_id = update.get("id") if isinstance(update, dict) else None
+        append_note(
+            config,
+            workspace_id,
+            f"Sandcastle result `{path}` entry {index} (id={entry_id!r}) failed to apply: {error}",
+        )
     maybe_mark_user_review(config, workspace_id)
+    if failures and not applied:
+        # Preserve the existing "this result was entirely unusable" signal for
+        # callers that treat a hard exception as "nothing here could be reconciled"
+        # (e.g. execute's per-item backstop, which then fails whichever of this
+        # result's issues never made it out of "running").
+        raise SystemExit(
+            f"Sandcastle result `{path}` had {len(failures)} invalid entr"
+            f"{'y' if len(failures) == 1 else 'ies'} and no valid updates were applied."
+        )
     return applied
 
 
@@ -1557,6 +1655,13 @@ def build_parser(*, sandcastle=False, prog=None):
         p.add_argument("id")
         p.add_argument("result_path")
         p.set_defaults(func=cmd_sandcastle_reconcile_result)
+
+        p = sandcastle_sub.add_parser("execute", help="Execute a Sandcastle plan")
+        p.add_argument("id")
+        p.add_argument("--plan", help="Explicit plan artifact path override")
+        p.add_argument("--command", required=True, help="Shell command to run per repo per wave")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(func=cmd_sandcastle_execute)
 
     issue = sub.add_parser("issue")
     issue_sub = issue.add_subparsers(dest="issue_command", required=True)
