@@ -16,6 +16,12 @@ This repo contains the Codex skill, templates, and helper scripts. Runtime works
 ~/workspaces/_ledger/workspaces/<workspace-id>
   Workspace metadata, spec, notes, and run outputs.
 
+~/workspaces/_ledger/projects/<repository-identity>
+  Private glossary and ADRs shared across workspaces for one repository.
+
+~/workspaces/_ledger/wayfinders/<map-id>
+  Private decision maps and tickets that may outlive a workspace.
+
 ~/workspaces/<workspace-id>/<repo>
   Actual git worktrees.
 
@@ -192,3 +198,17 @@ scripts/self_check.py
 - Normal list/status uses local files and local git only.
 - Jira and GitHub sync are explicit.
 - Closing a workspace does not delete worktrees.
+
+## Skill Interoperability
+
+Within a managed workspace, the workspace ledger overrides generic publication and discovery behavior from cooperating skills:
+
+- `to-spec` updates `spec.md` and sets the workspace to `scoped`; it does not create an issue.
+- `to-tickets` creates local implementation issues under `issues/`, including blocker metadata; it does not publish elsewhere.
+- `implement` works from a selected local ticket with `spec.md` as context, or directly from `spec.md` for a single-slice change with no tickets.
+- `code-review` uses `spec.md` and the local tickets represented by the diff as its Spec sources. Private project docs inform Spec review, not hard Standards findings.
+- `wayfinder` keeps private maps under `_ledger/wayfinders/`, reads source worktrees without modifying them by default, and uses linked prototype workspaces for experiments. External publication requires explicit approval.
+- `grilling` waits for confirmed shared understanding before changing workspace artifacts; `to-spec` captures the result.
+- `grill-with-docs` uses an existing repository `CONTEXT.md` or ADR directory. Missing domain-doc artifacts default to `_ledger/projects/<repository-identity>/`; creating them in the repository requires explicit approval.
+
+Private project knowledge currently covers one repository identity. Multi-repository domain models and first-class helper commands for wayfinders or prototype workspaces are intentionally deferred until real usage exposes the needed operations.

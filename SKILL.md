@@ -14,6 +14,8 @@ The default path is manual or subagent-driven development. For explicit Sandcast
 - Skill/tooling repo: this skill directory
 - Runtime config: `~/workspaces/config.yaml`
 - Runtime ledger: `~/workspaces/_ledger/workspaces/<workspace-id>/`
+- Private project knowledge: `~/workspaces/_ledger/projects/<repository-identity>/`
+- Private wayfinder maps: `~/workspaces/_ledger/wayfinders/<map-id>/`
 - Code worktrees: `~/workspaces/<workspace-id>/<repo>/`
 - VS Code workspace file: `~/workspaces/<workspace-id>/<workspace-id>.code-workspace`
 
@@ -34,6 +36,22 @@ runs/           # large/full agent run outputs
 The generated VS Code workspace file includes the ledger folder and every repo worktree recorded in `workspace.yaml`. Treat it as generated output: update the ledger through helper commands instead of hand-editing the workspace file.
 
 Use one mutable `spec.md`. Append notes at the bottom of `notes.md`.
+
+Private planning artifacts that outlive one implementation workspace live beside, not inside, the workspace ledgers:
+
+```text
+projects/<repository-identity>/
+  CONTEXT.md       # private project glossary, when the repo has none
+  docs/adr/        # private project ADRs, when the repo has no ADR directory
+
+wayfinders/<map-id>/
+  map.md           # mutable decision map
+  tickets/         # decision tickets, not implementation tickets
+  assets/          # durable prototype/research artifacts
+  notes.md
+```
+
+These locations are convention-driven for now. Edit them directly; do not invent helper commands before repeated usage shows which operations need automation.
 
 ## Configuration
 
@@ -92,6 +110,22 @@ scripts/workspace.py pr <id> opened|feedback|merged
 If a command is missing a behavior, inspect and edit the ledger directly rather than inventing another tracker.
 
 ## Workflow
+
+### Skill interoperability
+
+When working within a managed workspace, these preferences override conflicting publication or discovery instructions in cooperating skills:
+
+- **`to-spec`:** update the workspace's canonical `spec.md`, then set the workspace state to `scoped`. Do not create a local or external issue.
+- **`to-tickets`:** create one local implementation issue per ticket under the workspace's `issues/` directory, preserving blocker metadata. Do not publish the tickets elsewhere.
+- **`implement`:** when local tickets exist, treat the selected ticket as the execution contract and use `spec.md` as broader context. A single-slice change with no tickets may be implemented directly from `spec.md`.
+- **`code-review`:** use `spec.md` plus the local tickets represented by the diff as the Spec sources. For a whole task-branch review, use the full spec and every local ticket included in that branch. Private project glossary entries and ADRs may inform the Spec axis, but only repository-owned documentation can define hard Standards findings.
+- **`wayfinder`:** keep maps private under `ledger_root/wayfinders/` and inspect configured source repositories without modifying their worktrees by default. Do not publish maps or decision tickets externally without explicit approval. Feed resolved decisions into workspace `spec.md` rather than mixing decision tickets with implementation issues.
+- **`grilling`:** make no workspace changes until the user confirms shared understanding; use `to-spec` to capture the confirmed result.
+- **`grill-with-docs`:** update an existing repository `CONTEXT.md` and create ADRs in an existing repository ADR directory. When the corresponding repository artifact does not exist, write it under `ledger_root/projects/<repository-identity>/` instead. Creating a missing repository `CONTEXT.md` or ADR directory requires explicit approval. This publication rule applies only to domain documentation managed by `grill-with-docs`.
+
+Private project knowledge is currently scoped to one canonical repository identity. Multi-repository domain models are out of scope.
+
+Wayfinder maps may outlive and feed multiple implementation workspaces. A wayfinder prototype ticket may create a linked prototype workspace containing disposable code worktrees. Use a `prototype-<map-id>-<ticket-id>` workspace id, record the map and ticket links in `workspace.yaml` or `notes.md`, and do not push or merge the prototype by default. Copy or link its durable result back to the map before cleaning up its worktrees. Treat promotion of prototype code into production work as a separate, explicit decision.
 
 ### Create
 
