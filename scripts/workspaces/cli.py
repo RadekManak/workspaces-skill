@@ -615,6 +615,11 @@ def cmd_status(args):
         else:
             print(f"  ready: {len(ready)}")
         print("  statuses: " + " ".join(f"{k}:{v}" for k, v in sorted(counts.items())))
+    if args.show_config:
+        print("")
+        print("Config:")
+        rendered = yaml.safe_dump(config, sort_keys=False).strip()
+        print("\n".join(f"  {line}" for line in rendered.splitlines()))
 
 
 def cmd_open(args):
@@ -1138,6 +1143,7 @@ def build_parser(*, sandcastle=False, prog=None):
 
     p = sub.add_parser("status")
     p.add_argument("id", nargs="?")
+    p.add_argument("--show-config", action="store_true", help="append the resolved configuration")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("open")

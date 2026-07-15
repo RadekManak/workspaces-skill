@@ -76,6 +76,13 @@ def test_worktree_adopt_status_note_close(tmp, workspace_cli):
     status = run([str(workspace_cli), "status", "TASK-2"], env=env).stdout
     assert_contains(status, "VS Code:")
     assert_contains(status, "branch: TASK-2")
+    assert_not_contains(status, "Config:")
+    status_with_config = run(
+        [str(workspace_cli), "status", "TASK-2", "--show-config"], env=env
+    ).stdout
+    assert_contains(status_with_config, "Config:")
+    assert_contains(status_with_config, f"  ledger_root: {tmp / 'ledger'}")
+    assert_contains(status_with_config, "  base_branch: main")
 
     workspace_file.unlink()
     doctor = json.loads(run([str(workspace_cli), "doctor", "TASK-2", "--json"], env=env).stdout)

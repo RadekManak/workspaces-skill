@@ -77,6 +77,7 @@ Check local status:
 
 ```bash
 scripts/workspace.py status BILL-456
+scripts/workspace.py status BILL-456 --show-config
 ```
 
 Open the generated VS Code workspace:
