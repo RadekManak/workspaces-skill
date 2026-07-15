@@ -35,6 +35,19 @@ def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
     if not source.exists():
         raise SystemExit(f"Source repo not found: {source}")
     if not dest.exists():
+        base_ref = f"{config['base_remote']}/{config['base_branch']}"
+        # Refresh the local remote-tracking ref so new worktrees are not based on a stale tip.
+        run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "fetch",
+                config["base_remote"],
+                config["base_branch"],
+            ],
+            capture=True,
+        )
         run(
             [
                 "git",
@@ -45,7 +58,7 @@ def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
                 "-b",
                 branch or workspace_id,
                 str(dest),
-                f"{config['base_remote']}/{config['base_branch']}",
+                base_ref,
             ],
             capture=True,
         )

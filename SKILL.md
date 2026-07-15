@@ -101,6 +101,8 @@ Use `--input` to preserve the user's actual instruction in `spec.md`. Repos are 
 
 Create also writes `<workspace-id>.code-workspace` under the workspace root. Ledger-only workspaces still get a VS Code workspace file containing the ledger folder.
 
+`create` (with `--repo`) and `repo add` fetch `{base_remote}/{base_branch}` in the source repo before creating the linked worktree, so new task branches are not based on a stale local remote-tracking tip.
+
 During ordinary creation, do not explore the project or groom the task. Verify only what is needed to create the workspace: config, source repo existence, branch/base availability, and resulting local status. Ask for clarification only if creation is impossible or the request is immediately contradictory.
 
 ### Adopt

@@ -269,6 +269,42 @@ def test_repo_add_source_repo_creates_worktree_and_upserts():
             raise AssertionError(f"Expected worktree/source paths recorded, got {repos[0]}")
 
 
+def test_repo_add_fetches_base_before_worktree():
+    """Stale origin/main must be refreshed before the new worktree is created."""
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        source = make_source_repo(tmp_dir, "app")
+        stale = run(["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]).stdout.strip()
+        (source / "README.md").write_text("hello\nupdated\n", encoding="utf-8")
+        run(["git", "-C", str(source), "add", "README.md"])
+        run(["git", "-C", str(source), "commit", "-m", "advance main"])
+        fresh = run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip()
+        if fresh == stale:
+            raise AssertionError("Expected a new commit on main before testing fetch")
+        # Leave origin/main pointing at the old tip; add_source_repo must fetch first.
+        current_origin = run(
+            ["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]
+        ).stdout.strip()
+        if current_origin != stale:
+            raise AssertionError(f"Expected origin/main to stay stale at {stale}, got {current_origin}")
+
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("REPO-FETCH", title="Repo fetch test")
+        dest = repo.add_source_repo_to_workspace(config, workspace, "app")
+
+        worktree_head = run(["git", "-C", str(dest), "rev-parse", "HEAD"]).stdout.strip()
+        if worktree_head != fresh:
+            raise AssertionError(
+                f"Expected worktree based on fetched tip {fresh}, got {worktree_head} (stale was {stale})"
+            )
+        origin_after = run(
+            ["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]
+        ).stdout.strip()
+        if origin_after != fresh:
+            raise AssertionError(f"Expected fetch to update origin/main to {fresh}, got {origin_after}")
+
+
 def test_repo_refresh_repo_updates_git_metadata():
     with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
         tmp_dir = Path(tmp_dir)
@@ -485,6 +521,7 @@ WORKSPACE_MODEL_TESTS = [
     test_doctor_check_workspace_saves_unconditionally_on_fix,
     test_repo_select_repo_single_and_multi_and_named,
     test_repo_add_source_repo_creates_worktree_and_upserts,
+    test_repo_add_fetches_base_before_worktree,
     test_repo_refresh_repo_updates_git_metadata,
     test_github_sync_apply_pr_event_maps_state_and_records_pr,
     test_github_sync_sync_prs_raises_when_gh_missing,
