@@ -104,6 +104,8 @@ Use `repo add` for a linked worktree from a configured source repo, `repo adopt`
 
 Cleanup is HITL. Always run `cleanup-plan` first and show the result. Run cleanup only for workspace IDs the user explicitly approves.
 
+`cleanup-plan` refreshes recorded `githubPrs` via `gh pr view` before treating snapshots as open, and persists updated state. Soft-fails (keeps the snapshot) when `gh` is missing or a view fails.
+
 For bulk review, use `cleanup-plan --all --write`; it stores an auditable JSON plan under `ledger_root/runs/`. Then use `cleanup --from-plan` for the approved IDs. Cleanup revalidates the plan and refuses stale entries.
 
 Normal workspace cleanup removes clean linked worktrees and the generated workspace root, retains the ledger, marks the workspace closed, and records `cleanupStatus: done`. It refuses active states, dirty repos, non-linked checkouts, outside-root worktrees, unexpected root files, open PR snapshots, and active Sandcastle locks.

@@ -387,6 +387,84 @@ def test_github_sync_sync_prs_raises_when_gh_missing():
             github_sync.shutil.which = original_which
 
 
+def test_github_sync_refresh_recorded_prs_updates_merged_from_gh():
+    workspace = Workspace(
+        {
+            "id": "GH-REFRESH",
+            "links": {
+                "githubPrs": [
+                    {
+                        "url": "https://github.com/openshift/machine-api-provider-ibmcloud/pull/97",
+                        "number": 97,
+                        "repo": "machine-api-provider-ibmcloud",
+                        "state": "OPEN",
+                        "merged": False,
+                    }
+                ]
+            },
+        }
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] != ["gh", "pr"] or "view" not in cmd:
+            raise AssertionError(f"Unexpected command: {cmd}")
+        return json.dumps(
+            {
+                "number": 97,
+                "url": "https://github.com/openshift/machine-api-provider-ibmcloud/pull/97",
+                "state": "MERGED",
+                "mergedAt": "2026-07-21T14:11:20Z",
+                "title": "boot volume",
+                "headRefName": "sdp-boot-volume",
+            }
+        )
+
+    original_run = github_sync.run
+    original_which = github_sync.shutil.which
+    github_sync.run = fake_run
+    github_sync.shutil.which = lambda *args, **kwargs: "/usr/bin/gh"
+    try:
+        changed = github_sync.refresh_recorded_prs(workspace)
+        if not changed:
+            raise AssertionError("Expected refresh_recorded_prs to report a change")
+        pr = workspace.github_prs[0]
+        if pr.get("state") != "MERGED" or not pr.get("merged"):
+            raise AssertionError(f"Expected PR snapshot refreshed to MERGED, got {pr}")
+        if pr.get("branch") != "sdp-boot-volume":
+            raise AssertionError(f"Expected headRefName recorded as branch, got {pr}")
+    finally:
+        github_sync.run = original_run
+        github_sync.shutil.which = original_which
+
+
+def test_github_sync_refresh_recorded_prs_soft_fails_when_gh_missing():
+    workspace = Workspace(
+        {
+            "id": "GH-REFRESH-NO-CLI",
+            "links": {
+                "githubPrs": [
+                    {
+                        "url": "https://github.com/openshift/foo/pull/1",
+                        "number": 1,
+                        "state": "OPEN",
+                        "merged": False,
+                    }
+                ]
+            },
+        }
+    )
+    original_which = github_sync.shutil.which
+    github_sync.shutil.which = lambda *args, **kwargs: None
+    try:
+        changed = github_sync.refresh_recorded_prs(workspace)
+        if changed:
+            raise AssertionError("Expected no change when gh is missing")
+        if workspace.github_prs[0].get("state") != "OPEN":
+            raise AssertionError("Expected stale snapshot to remain when gh is missing")
+    finally:
+        github_sync.shutil.which = original_which
+
+
 def test_sandcastle_reconcile_apply_result_updates_issue_status_and_notes():
     with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
         tmp_dir = Path(tmp_dir)
@@ -525,6 +603,8 @@ WORKSPACE_MODEL_TESTS = [
     test_repo_refresh_repo_updates_git_metadata,
     test_github_sync_apply_pr_event_maps_state_and_records_pr,
     test_github_sync_sync_prs_raises_when_gh_missing,
+    test_github_sync_refresh_recorded_prs_updates_merged_from_gh,
+    test_github_sync_refresh_recorded_prs_soft_fails_when_gh_missing,
     test_sandcastle_reconcile_apply_result_updates_issue_status_and_notes,
     test_sandcastle_reconcile_apply_result_isolates_bad_entries,
     test_sandcastle_reconcile_apply_result_raises_when_all_entries_fail,

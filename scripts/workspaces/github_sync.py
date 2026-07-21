@@ -4,13 +4,24 @@ Covers the two ways a workspace's recorded GitHub PR state changes: bulk
 snapshot gathering by shelling out to `gh pr list` per repo (`sync_prs`), and
 recording a single lifecycle event such as opened/feedback/merged along with
 its associated PR state transition (`apply_pr_event`).
+
+`refresh_recorded_prs` re-checks already-recorded snapshots via `gh pr view`
+so cleanup decisions are not stuck on stale OPEN entries.
 """
 import json
+import re
 import shutil
 from pathlib import Path
 
 from workspaces.common import now, run
 from workspaces.git import git_info, github_repo_from_remote
+
+
+_PR_VIEW_FIELDS = "number,url,state,mergedAt,title,headRefName"
+_PR_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/(?P<repo>[^/]+/[^/]+)/pull/(?P<number>\d+)",
+    re.IGNORECASE,
+)
 
 
 def sync_prs(config, workspace):
@@ -69,6 +80,77 @@ def sync_prs(config, workspace):
     for item in seen:
         workspace.record_github_pr(item)
     return seen
+
+
+def _pr_view_command(pr):
+    """Build `gh pr view` argv for a recorded snapshot, or None if underspecified."""
+    url = (pr.get("url") or "").strip()
+    if url:
+        return ["gh", "pr", "view", url, "--json", _PR_VIEW_FIELDS]
+    number = pr.get("number")
+    repo = (pr.get("repo") or "").strip()
+    if number is None:
+        return None
+    match = _PR_URL_RE.search(repo) if "://" in repo else None
+    if match:
+        repo = match.group("repo")
+    if "/" not in repo:
+        return None
+    return ["gh", "pr", "view", str(number), "--repo", repo, "--json", _PR_VIEW_FIELDS]
+
+
+def refresh_recorded_prs(workspace):
+    """Refresh recorded `githubPrs` snapshots via `gh pr view`.
+
+    Soft-fails when `gh` is missing or a view fails: leaves that snapshot
+    unchanged. Returns True if any snapshot was updated.
+    """
+    if shutil.which("gh") is None:
+        return False
+    changed = False
+    for index, pr in enumerate(workspace.github_prs):
+        cmd = _pr_view_command(pr)
+        if not cmd:
+            continue
+        raw = run(cmd, check=False)
+        try:
+            live = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            live = None
+        if not isinstance(live, dict) or live.get("number") is None:
+            continue
+        state = live.get("state")
+        merged = bool(live.get("mergedAt")) or str(state or "").upper() == "MERGED"
+        item = {
+            "number": live.get("number"),
+            "url": live.get("url") or pr.get("url"),
+            "branch": live.get("headRefName") or pr.get("branch"),
+            "state": state,
+            "merged": merged,
+            "lastSeenAt": now(),
+            "title": live.get("title"),
+        }
+        before = {
+            "state": pr.get("state"),
+            "merged": bool(pr.get("merged")),
+            "title": pr.get("title"),
+            "branch": pr.get("branch"),
+            "url": pr.get("url"),
+            "number": pr.get("number"),
+        }
+        after = {
+            "state": item["state"],
+            "merged": item["merged"],
+            "title": item["title"],
+            "branch": item["branch"],
+            "url": item["url"],
+            "number": item["number"],
+        }
+        if before == after:
+            continue
+        workspace.update_github_pr_snapshot(index, item)
+        changed = True
+    return changed
 
 
 def apply_pr_event(workspace, event, url=None, number=None):

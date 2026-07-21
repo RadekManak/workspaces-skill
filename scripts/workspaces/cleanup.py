@@ -14,8 +14,10 @@ from .git import (
     worktree_dirty,
     worktree_for_branch,
 )
+from . import github_sync
 from .issues import ISSUE_DONE_STATUSES, issue_index, iter_issues, set_issue_status
 from .ledger import WorkspaceLedger
+
 
 
 class CleanupSafety:
@@ -86,6 +88,8 @@ class CleanupSafety:
             repo_rows.append(row)
 
         extra_paths = self.workspace_root_extra_paths(workspace)
+        if github_sync.refresh_recorded_prs(workspace):
+            self.ledger.save(workspace)
         prs = workspace.github_prs
         open_prs = [
             pr

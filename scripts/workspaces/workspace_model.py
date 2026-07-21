@@ -113,6 +113,17 @@ class Workspace:
                 return
         prs.append(dict(item))
 
+    def update_github_pr_snapshot(self, index, item):
+        """Merge `item` into the recorded PR at `index`."""
+        links = self._data.setdefault("links", {})
+        prs = links.setdefault("githubPrs", [])
+        if not (0 <= index < len(prs)):
+            raise SystemExit(f"githubPrs index out of range: {index}")
+        prs[index] = {
+            **prs[index],
+            **{key: value for key, value in item.items() if value is not None},
+        }
+
     def append_github_pr(self, item):
         """Unconditionally append a PR lifecycle event, keeping full history."""
         links = self._data.setdefault("links", {})

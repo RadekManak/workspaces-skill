@@ -435,6 +435,70 @@ def test_workspace_force_cleanup(tmp, workspace_cli):
         raise AssertionError(f"Expected force cleanup note, got:\n{notes}")
 
 
+def test_cleanup_plan_refreshes_stale_open_pr_via_gh(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, "repo")
+    run(
+        [str(workspace_cli), "create", "TASK-PR-REFRESH", "--title", "PR refresh cleanup", "--repo", "repo"],
+        env=env,
+    )
+    run([str(workspace_cli), "close", "TASK-PR-REFRESH"], env=env)
+
+    workspace_yaml = tmp / "ledger" / "workspaces" / "TASK-PR-REFRESH" / "workspace.yaml"
+    data = read_yaml(workspace_yaml)
+    data["links"] = {
+        "githubPrs": [
+            {
+                "url": "https://github.com/openshift/example/pull/97",
+                "number": 97,
+                "repo": "example",
+                "branch": "feature",
+                "state": "OPEN",
+                "merged": False,
+            }
+        ]
+    }
+    workspace_yaml.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    bin_dir = tmp / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "if 'view' not in sys.argv:\n"
+        "    sys.exit(2)\n"
+        "print(json.dumps({\n"
+        "  'number': 97,\n"
+        "  'url': 'https://github.com/openshift/example/pull/97',\n"
+        "  'state': 'MERGED',\n"
+        "  'mergedAt': '2026-07-21T14:11:20Z',\n"
+        "  'title': 'done',\n"
+        "  'headRefName': 'feature',\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', '')}"}
+
+    plan = json.loads(
+        run([str(workspace_cli), "cleanup-plan", "TASK-PR-REFRESH", "--json"], env=env).stdout
+    )
+    candidate = plan["candidates"][0]
+    if candidate["recommendedAction"] != "safe-to-remove":
+        raise AssertionError(
+            f"Expected stale OPEN PR refreshed via gh to allow safe-to-remove, got {candidate}"
+        )
+    if candidate.get("openPrCount") != 0:
+        raise AssertionError(f"Expected openPrCount 0 after gh refresh, got {candidate}")
+
+    refreshed = read_yaml(workspace_yaml)
+    pr = refreshed["links"]["githubPrs"][0]
+    if pr.get("state") != "MERGED" or not pr.get("merged"):
+        raise AssertionError(f"Expected ledger PR snapshot persisted as MERGED, got {pr}")
+
+
 def test_doctor_fix_output(tmp, workspace_cli):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, workspace_cli)
@@ -617,6 +681,7 @@ BASE_TESTS = [
     test_repo_crud_and_pr_lifecycle,
     test_workspace_cleanup_plan_and_execution,
     test_workspace_force_cleanup,
+    test_cleanup_plan_refreshes_stale_open_pr_via_gh,
     test_doctor_fix_output,
     test_doctor_multi_id_and_all,
     test_doctor_fix_skips_vscode_json_for_cleanup_done_workspace,
