@@ -23,6 +23,8 @@ DEFAULT_CONFIG = {
     "editor_command": "code",
 }
 
+WORKSPACE_POINTER = ".workspace-id"
+
 DONE_STATES = {"closed", "dev-complete"}
 STATE_ORDER = {
     "review-feedback": 0,
@@ -40,6 +42,11 @@ STATE_ORDER = {
 
 def now():
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def timestamp_slug():
+    """Filename-safe local timestamp used to name generated run artifacts."""
+    return dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
 
 
 def expand(value):
@@ -68,9 +75,19 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def repo_projection(repo, *fields):
-    """Project a repo dict down to a plan/runner-safe subset of fields."""
-    return {field: repo.get(field) for field in fields}
+def parse_json(text, default=None):
+    """Parse `text` as JSON, returning `default` when it is empty or malformed."""
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return default
+
+
+def project(data, *fields):
+    """Project a dict down to a fixed subset of fields, defaulting missing ones to None."""
+    return {field: data.get(field) for field in fields}
 
 
 def repo_identity_snapshot(repos):
@@ -111,6 +128,24 @@ def run(cmd, cwd=None, check=True, capture=True):
         stderr = (proc.stderr or "").strip()
         raise SystemExit(f"Command failed: {' '.join(cmd)}\n{stderr}")
     return (proc.stdout or "").strip()
+
+
+def read_workspace_pointer(start):
+    """Return the workspace id from the nearest `.workspace-id` at or above `start`."""
+    current = Path(start).resolve()
+    for parent in [current, *current.parents]:
+        pointer = parent / WORKSPACE_POINTER
+        if pointer.exists():
+            return pointer.read_text(encoding="utf-8").strip()
+    return None
+
+
+def write_workspace_pointer(root, workspace_id):
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    pointer = root / WORKSPACE_POINTER
+    pointer.write_text(workspace_id + "\n", encoding="utf-8")
+    return pointer
 
 
 def relative_or_absolute(path, base):
