@@ -8,16 +8,16 @@ its associated PR state transition (`apply_pr_event`).
 `refresh_recorded_prs` re-checks already-recorded snapshots via `gh pr view`
 so cleanup decisions are not stuck on stale OPEN entries.
 """
-import json
 import re
 import shutil
 from pathlib import Path
 
-from workspaces.common import now, run
+from workspaces.common import now, parse_json, project, run
 from workspaces.git import git_info, github_repo_from_remote
 
 
 _PR_VIEW_FIELDS = "number,url,state,mergedAt,title,headRefName"
+_PR_SNAPSHOT_FIELDS = ("number", "url", "branch", "state", "merged", "title")
 _PR_URL_RE = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/(?P<repo>[^/]+/[^/]+)/pull/(?P<number>\d+)",
     re.IGNORECASE,
@@ -61,10 +61,7 @@ def sync_prs(config, workspace):
             ],
             check=False,
         )
-        try:
-            prs = json.loads(raw) if raw else []
-        except json.JSONDecodeError:
-            prs = []
+        prs = parse_json(raw, default=[])
         for pr in prs:
             item = {
                 "repo": repo.get("name"),
@@ -113,10 +110,7 @@ def refresh_recorded_prs(workspace):
         if not cmd:
             continue
         raw = run(cmd, check=False)
-        try:
-            live = json.loads(raw) if raw else None
-        except json.JSONDecodeError:
-            live = None
+        live = parse_json(raw)
         if not isinstance(live, dict) or live.get("number") is None:
             continue
         state = live.get("state")
@@ -130,22 +124,8 @@ def refresh_recorded_prs(workspace):
             "lastSeenAt": now(),
             "title": live.get("title"),
         }
-        before = {
-            "state": pr.get("state"),
-            "merged": bool(pr.get("merged")),
-            "title": pr.get("title"),
-            "branch": pr.get("branch"),
-            "url": pr.get("url"),
-            "number": pr.get("number"),
-        }
-        after = {
-            "state": item["state"],
-            "merged": item["merged"],
-            "title": item["title"],
-            "branch": item["branch"],
-            "url": item["url"],
-            "number": item["number"],
-        }
+        before = {**project(pr, *_PR_SNAPSHOT_FIELDS), "merged": bool(pr.get("merged"))}
+        after = project(item, *_PR_SNAPSHOT_FIELDS)
         if before == after:
             continue
         workspace.update_github_pr_snapshot(index, item)

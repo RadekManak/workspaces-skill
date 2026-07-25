@@ -4,10 +4,14 @@ Detects and (optionally) fixes: missing ledger directories/files, a missing
 or stale workspace pointer, a stale `.code-workspace` file, and repo
 worktree problems (missing worktree, branch drift, uncommitted changes).
 """
-import json
 from pathlib import Path
 
-from workspaces.common import template
+from workspaces.common import (
+    WORKSPACE_POINTER,
+    parse_json,
+    template,
+    write_workspace_pointer,
+)
 from workspaces.git import git_info
 from workspaces.ledger import WorkspaceLedger
 
@@ -63,7 +67,7 @@ def check_workspace(config, workspace, fix=False):
             issues.append(issue)
 
     if workspace.cleanup_status != "done":
-        pointer = workspace_root / ".workspace-id"
+        pointer = workspace_root / WORKSPACE_POINTER
         if not pointer.exists() or pointer.read_text(encoding="utf-8").strip() != workspace_id:
             issue = doctor_issue(
                 "warning",
@@ -72,18 +76,14 @@ def check_workspace(config, workspace, fix=False):
                 True,
             )
             if fix:
-                workspace_root.mkdir(parents=True, exist_ok=True)
-                pointer.write_text(workspace_id + "\n", encoding="utf-8")
+                write_workspace_pointer(workspace_root, workspace_id)
                 issue["fixed"] = True
             issues.append(issue)
 
         expected_path, expected_payload = ledger.build_vscode_workspace(workspace)
         actual_payload = None
         if expected_path.exists():
-            try:
-                actual_payload = json.loads(expected_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                actual_payload = None
+            actual_payload = parse_json(expected_path.read_text(encoding="utf-8"))
         if actual_payload != expected_payload:
             issue = doctor_issue(
                 "warning",

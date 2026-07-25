@@ -1,9 +1,16 @@
-import datetime as dt
 import json
 import shutil
 from pathlib import Path
 
-from .common import DONE_STATES, now, run
+from .common import (
+    DONE_STATES,
+    WORKSPACE_POINTER,
+    now,
+    project,
+    run,
+    timestamp_slug,
+    write_json,
+)
 from .git import (
     branch_exists,
     branch_merged,
@@ -17,7 +24,37 @@ from .git import (
 from . import github_sync
 from .issues import ISSUE_DONE_STATUSES, issue_index, iter_issues, set_issue_status
 from .ledger import WorkspaceLedger
+from .table import print_table
 
+
+WORKSPACE_PLAN_COLUMNS = [
+    ("WORKSPACE", 24),
+    ("STATE", 14),
+    ("ACTION", 14),
+    ("REPOS", 5),
+    ("DIRTY", 5),
+    ("AHEAD", 5),
+    ("PRS", 3),
+    ("REASON", None),
+]
+ISSUE_PLAN_COLUMNS = [
+    ("ITEM", 24),
+    ("ACTION", 14),
+    ("BRANCH", 32),
+    ("MERGED", 6),
+    ("DIRTY", 5),
+    ("REASON", None),
+]
+SNAPSHOT_REPO_FIELDS = (
+    "name",
+    "path",
+    "branch",
+    "exists",
+    "dirty",
+    "aheadOfBase",
+    "linkedWorktree",
+    "underWorkspaceRoot",
+)
 
 
 class CleanupSafety:
@@ -30,7 +67,7 @@ class CleanupSafety:
         root = self.ledger.workspace_root_path(workspace.id)
         if not root.exists():
             return []
-        expected = {".workspace-id", f"{workspace.id}.code-workspace"}
+        expected = {WORKSPACE_POINTER, f"{workspace.id}.code-workspace"}
         for repo in workspace.repos:
             path = repo.get("worktreePath")
             if path and path_is_under(path, root):
@@ -155,21 +192,22 @@ class CleanupSafety:
         if not candidates:
             print("No workspace cleanup candidates found.")
             return
-        print(
-            f"{'WORKSPACE':24} {'STATE':14} {'ACTION':14} {'REPOS':5} "
-            f"{'DIRTY':5} {'AHEAD':5} {'PRS':3} REASON"
+        print_table(
+            WORKSPACE_PLAN_COLUMNS,
+            [
+                (
+                    item["workspace"],
+                    item["state"] or "-",
+                    item["recommendedAction"],
+                    item["existingRepoCount"],
+                    len(item["dirtyRepos"]),
+                    item["aheadOfBase"],
+                    item["openPrCount"],
+                    item["reason"],
+                )
+                for item in candidates
+            ],
         )
-        for item in candidates:
-            print(
-                f"{item['workspace'][:24]:24} "
-                f"{str(item['state'] or '-')[:14]:14} "
-                f"{item['recommendedAction'][:14]:14} "
-                f"{str(item['existingRepoCount'])[:5]:5} "
-                f"{str(len(item['dirtyRepos']))[:5]:5} "
-                f"{str(item['aheadOfBase'])[:5]:5} "
-                f"{str(item['openPrCount'])[:3]:3} "
-                f"{item['reason']}"
-            )
 
     def snapshot(self, candidate):
         return {
@@ -189,31 +227,20 @@ class CleanupSafety:
             "recommendedAction": candidate.get("recommendedAction"),
             "reason": candidate.get("reason"),
             "repos": [
-                {
-                    "name": repo.get("name"),
-                    "path": repo.get("path"),
-                    "branch": repo.get("branch"),
-                    "exists": repo.get("exists"),
-                    "dirty": repo.get("dirty"),
-                    "aheadOfBase": repo.get("aheadOfBase"),
-                    "linkedWorktree": repo.get("linkedWorktree"),
-                    "underWorkspaceRoot": repo.get("underWorkspaceRoot"),
-                }
+                project(repo, *SNAPSHOT_REPO_FIELDS)
                 for repo in candidate.get("repos", [])
             ],
         }
 
     def write_plan(self, candidates):
-        stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-        path = self.ledger.cleanup_runs_dir() / f"cleanup-plan-{stamp}.json"
+        path = self.ledger.cleanup_runs_dir() / f"cleanup-plan-{timestamp_slug()}.json"
         payload = {
             "version": 1,
             "type": "workspace-cleanup",
             "createdAt": now(),
             "candidates": candidates,
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_json(path, payload)
         return path, payload
 
     @staticmethod
@@ -403,20 +430,20 @@ class CleanupSafety:
         if not candidates:
             print("No cleanup candidates found.")
             return
-        print(
-            f"{'ITEM':24} {'ACTION':14} {'BRANCH':32} {'MERGED':6} {'DIRTY':5} REASON"
+        print_table(
+            ISSUE_PLAN_COLUMNS,
+            [
+                (
+                    item["item"],
+                    item["recommendedAction"],
+                    item["branch"] or "-",
+                    str(item["mergedIntoTaskBranch"]),
+                    str(item["worktreeDirty"]),
+                    item["reason"],
+                )
+                for item in candidates
+            ],
         )
-        for item in candidates:
-            merged = item["mergedIntoTaskBranch"]
-            dirty = item["worktreeDirty"]
-            print(
-                f"{item['item'][:24]:24} "
-                f"{item['recommendedAction'][:14]:14} "
-                f"{str(item['branch'] or '-')[:32]:32} "
-                f"{str(merged)[:6]:6} "
-                f"{str(dirty)[:5]:5} "
-                f"{item['reason']}"
-            )
 
     def cleanup_item(self, item, repo_name=None):
         if ":" not in item:

@@ -1,11 +1,10 @@
 """Sandcastle execute: wave-based dependency-ordered multi-repo orchestration."""
-import datetime as dt
 import json
 import os
 import subprocess
 from pathlib import Path
 
-from .common import read_json, repo_projection, write_json
+from .common import project, read_json, timestamp_slug, write_json
 from .issues import ISSUE_DONE_STATUSES, issue_index, issue_payload, resolve_issue_repo_or_raw
 from .ledger import WorkspaceLedger
 from .sandcastle_plan import planning_fingerprint
@@ -181,7 +180,7 @@ def dependency_map(payload):
 
 def runner_repos(payload):
     return [
-        repo_projection(repo, "name", "worktreePath")
+        project(repo, "name", "worktreePath")
         for repo in payload.get("repos") or []
         if repo.get("name")
     ]
@@ -295,7 +294,7 @@ def write_runner_plan(
             "specPath": workspace.get("specPath"),
         },
         "repos": runner_repos(payload),
-        "repo": repo_projection(repo, "name", "worktreePath", "branch"),
+        "repo": project(repo, "name", "worktreePath", "branch"),
         "issues": [
             runner_issue_record(
                 ledger,
@@ -307,7 +306,7 @@ def write_runner_plan(
             for issue_id in issue_ids
         ],
     }
-    stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+    stamp = timestamp_slug()
     plan_path = runs_dir / f"sandcastle-run-plan-w{wave_number}-{repo_name}-{stamp}.json"
     result_path = runs_dir / f"sandcastle-run-result-w{wave_number}-{repo_name}-{stamp}.json"
     write_json(plan_path, runner_plan)
@@ -415,6 +414,14 @@ def execute_plan(
         workspace_id,
         {"planPath": str(plan_path), "targetedIssueIds": targeted_ids},
     )
+
+    def fail_issues(issue_ids, *, last_error, note=None):
+        for issue_id in issue_ids:
+            set_status(workspace_id, issue_id, "failed", extra={"lastError": last_error})
+        save_workspace(load_workspace(workspace_id))
+        if note:
+            append_note(workspace_id, note)
+
     result = None
     try:
         append_note(
@@ -491,14 +498,10 @@ def execute_plan(
                         f"Failed to launch Sandcastle command for repo `{repo_name}` "
                         f"wave {wave.get('wave', 0)}: {error}",
                     )
-                    for issue_id in issue_ids:
-                        set_status(
-                            workspace_id,
-                            issue_id,
-                            "failed",
-                            extra={"lastError": f"Failed to launch Sandcastle command: {error}"},
-                        )
-                    save_workspace(load_workspace(workspace_id))
+                    fail_issues(
+                        issue_ids,
+                        last_error=f"Failed to launch Sandcastle command: {error}",
+                    )
                     continue
                 invocation.append(
                     {
@@ -527,23 +530,16 @@ def execute_plan(
                             f"for repo `{item['repo']}`: {error}",
                         )
                 elif returncode != 0:
-                    for issue_id in item["issueIds"]:
-                        set_status(
-                            workspace_id,
-                            issue_id,
-                            "failed",
-                            extra={
-                                "lastError": (
-                                    f"Sandcastle command exited with code {returncode} "
-                                    "with no result file"
-                                )
-                            },
-                        )
-                    save_workspace(load_workspace(workspace_id))
-                    append_note(
-                        workspace_id,
-                        f"Marked {len(item['issueIds'])} issue(s) failed in repo `{item['repo']}` "
-                        "because no result file was written.",
+                    fail_issues(
+                        item["issueIds"],
+                        last_error=(
+                            f"Sandcastle command exited with code {returncode} "
+                            "with no result file"
+                        ),
+                        note=(
+                            f"Marked {len(item['issueIds'])} issue(s) failed in repo "
+                            f"`{item['repo']}` because no result file was written."
+                        ),
                     )
 
                 # Backstop: anything still "running" after the above -- whether from a
@@ -558,23 +554,17 @@ def execute_plan(
                     if index_after.get(issue_id, {}).get("meta", {}).get("status") == "running"
                 )
                 if stuck_ids:
-                    for issue_id in stuck_ids:
-                        set_status(
-                            workspace_id,
-                            issue_id,
-                            "failed",
-                            extra={
-                                "lastError": (
-                                    "Sandcastle runner exited without reporting a result "
-                                    "for this issue"
-                                )
-                            },
-                        )
-                    save_workspace(load_workspace(workspace_id))
-                    append_note(
-                        workspace_id,
-                        f"Marked {len(stuck_ids)} issue(s) failed in repo `{item['repo']}` "
-                        "because the runner did not report a result for them.",
+                    fail_issues(
+                        stuck_ids,
+                        last_error=(
+                            "Sandcastle runner exited without reporting a result "
+                            "for this issue"
+                        ),
+                        note=(
+                            f"Marked {len(stuck_ids)} issue(s) failed in repo "
+                            f"`{item['repo']}` because the runner did not report a "
+                            "result for them."
+                        ),
                     )
 
         index = issue_index(ledger, workspace_id)
