@@ -331,7 +331,29 @@ def test_github_sync_refresh_recorded_prs_treats_merged_state_without_merged_at_
         raise AssertionError(f"Expected the recorded url to be preserved when `gh` omits it, got {pr}")
 
 
+def test_github_sync_gh_json_applies_command_timeout():
+    """Every `gh` invocation must be bounded so a stuck call cannot hang cleanup."""
+    captured = {}
+    original_run = github_sync.run
+
+    def fake_run(cmd, *args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return "{}"
+
+    github_sync.run = fake_run
+    try:
+        github_sync._gh_json(["gh", "pr", "view", "1", "--json", "state"])
+    finally:
+        github_sync.run = original_run
+    if captured.get("timeout") != github_sync._GH_TIMEOUT_SECONDS:
+        raise AssertionError(
+            f"Expected _gh_json to bound gh with a {github_sync._GH_TIMEOUT_SECONDS}s timeout, "
+            f"got {captured.get('timeout')}"
+        )
+
+
 GITHUB_SYNC_TESTS = [
+    test_github_sync_gh_json_applies_command_timeout,
     test_github_sync_sync_prs_records_snapshots_per_repo,
     test_github_sync_sync_prs_marks_merged_from_merged_at,
     test_github_sync_sync_prs_skips_repos_it_cannot_query,

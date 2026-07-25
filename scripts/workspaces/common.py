@@ -164,18 +164,24 @@ def slug(value):
     return text or "issue"
 
 
-def run(cmd, cwd=None, check=True, capture=True):
-    proc = subprocess.run(
-        cmd,
-        cwd=cwd,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-    )
+def run(cmd, cwd=None, check=True, capture=True, timeout=None):
+    printable = " ".join(str(part) for part in cmd)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=cwd,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        if check:
+            raise SystemExit(f"Command timed out after {timeout}s: {printable}") from error
+        return ""
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        printable = " ".join(str(part) for part in cmd)
         raise SystemExit(
             f"Command failed (exit {proc.returncode}): {printable}"
             + (f"\n{stderr}" if stderr else "")

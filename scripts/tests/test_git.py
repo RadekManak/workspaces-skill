@@ -11,6 +11,7 @@ from tests.support import make_source_repo, run
 
 from workspaces import git as git_model
 from workspaces.common import DEFAULT_CONFIG
+from workspaces.common import run as common_run
 
 
 def _git_test_config():
@@ -265,7 +266,23 @@ def test_git_remove_linked_worktree_falls_back_when_source_is_gone():
             raise AssertionError("Expected removal to fall back to running git inside the worktree itself")
 
 
+def test_run_enforces_timeout():
+    """A hung subprocess must not block the caller forever."""
+    # check=False soft-fails to empty output instead of raising.
+    if common_run(["sleep", "5"], timeout=0.2, check=False) != "":
+        raise AssertionError("Expected a timed-out command to return empty output when check=False")
+    # check=True surfaces the timeout as SystemExit rather than hanging.
+    try:
+        common_run(["sleep", "5"], timeout=0.2)
+    except SystemExit as error:
+        if "timed out" not in str(error):
+            raise AssertionError(f"Expected a timeout SystemExit, got {error}")
+    else:
+        raise AssertionError("Expected SystemExit when a command exceeds its timeout")
+
+
 GIT_TESTS = [
+    test_run_enforces_timeout,
     test_git_repo_name_from_remote_handles_every_remote_form,
     test_git_github_repo_from_remote_requires_owner_and_name,
     test_git_path_is_under_only_matches_real_descendants,
