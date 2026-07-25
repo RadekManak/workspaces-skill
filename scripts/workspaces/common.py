@@ -91,6 +91,43 @@ def repo_identity_snapshot(repos):
     )
 
 
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_workspace_id(workspace_id):
+    """Validate a workspace id used to build ledger/workspace filesystem paths.
+
+    Workspace ids are joined onto trusted roots (`ledger_root`, `workspace_root`)
+    to derive read/write/delete paths, so an id containing path separators or
+    `..` segments would let an operation escape those roots. Reject anything that
+    is not a plain identifier before it can reach the filesystem.
+    """
+    text = str(workspace_id or "").strip()
+    if not _WORKSPACE_ID_RE.fullmatch(text):
+        raise SystemExit(
+            f"Invalid workspace id: {workspace_id!r}. Use letters, digits, '.', '_', or '-' "
+            "and no path separators."
+        )
+    return text
+
+
+def validate_repo_name(repo_name):
+    """Validate a repo name that is joined onto `source_root`/`workspace_root`.
+
+    Mirrors `validate_workspace_id`: the name becomes a path segment for the
+    source checkout and worktree destination, so path separators or `..`
+    segments must be rejected to keep both inside their intended roots.
+    """
+    text = str(repo_name or "").strip()
+    if not _REPO_NAME_RE.fullmatch(text):
+        raise SystemExit(
+            f"Invalid repo name: {repo_name!r}. Use letters, digits, '.', '_', or '-' "
+            "and no path separators."
+        )
+    return text
+
+
 def slug(value):
     text = str(value).strip().lower()
     text = re.sub(r"[^a-z0-9._-]+", "-", text)

@@ -4,7 +4,17 @@ import json
 import os
 from pathlib import Path
 
-from .common import now, read_json, read_yaml, relative_or_absolute, slug, template, write_json, write_yaml
+from .common import (
+    now,
+    read_json,
+    read_yaml,
+    relative_or_absolute,
+    slug,
+    template,
+    validate_workspace_id,
+    write_json,
+    write_yaml,
+)
 from .sandcastle_state import maybe_invalidate_plan_for_repo_change
 from .workspace_model import Workspace
 
@@ -14,12 +24,14 @@ class WorkspaceLedger:
         self.config = config
 
     def ledger_dir(self, workspace_id):
+        workspace_id = validate_workspace_id(workspace_id)
         return Path(self.config["ledger_root"]) / "workspaces" / workspace_id
 
     def workspace_yaml_path(self, workspace_id):
         return self.ledger_dir(workspace_id) / "workspace.yaml"
 
     def workspace_root_path(self, workspace_id):
+        workspace_id = validate_workspace_id(workspace_id)
         return Path(self.config["workspace_root"]) / workspace_id
 
     def vscode_workspace_path(self, workspace_id):

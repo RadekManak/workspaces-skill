@@ -8,7 +8,7 @@ from disk.
 """
 from pathlib import Path
 
-from workspaces.common import run
+from workspaces.common import run, validate_repo_name
 from workspaces.git import git_info, remove_linked_worktree
 from workspaces.ledger import WorkspaceLedger
 
@@ -26,6 +26,7 @@ def select_repo(workspace, repo_name=None):
 
 
 def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
+    repo_name = validate_repo_name(repo_name)
     workspace_id = workspace.id
     workspace_root = WorkspaceLedger(config).workspace_root_path(workspace_id)
     workspace_root.mkdir(parents=True, exist_ok=True)
