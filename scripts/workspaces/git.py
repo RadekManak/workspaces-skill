@@ -44,9 +44,13 @@ def git_info(path, config):
     if root is None:
         raise SystemExit(f"Not inside a git repo: {path}")
     branch = run(["git", "-C", str(root), "branch", "--show-current"], check=False)
+    # A missing remote or missing base ref is an ordinary configuration, but a
+    # failing `git status` in a resolved repo root means the working tree cannot
+    # be inspected at all, and reporting that as "clean" would let cleanup delete
+    # uncommitted work.
     origin = run(["git", "-C", str(root), "remote", "get-url", "origin"], check=False)
     fork = run(["git", "-C", str(root), "remote", "get-url", config["push_remote"]], check=False)
-    status = run(["git", "-C", str(root), "status", "--short"], check=False)
+    status = run(["git", "-C", str(root), "status", "--short"])
     ahead = run(
         [
             "git",
@@ -99,7 +103,7 @@ def is_linked_worktree(path):
 
 
 def git_worktrees(path):
-    output = run(["git", "-C", str(path), "worktree", "list", "--porcelain"], check=False)
+    output = run(["git", "-C", str(path), "worktree", "list", "--porcelain"])
     entries = []
     current = {}
     for line in output.splitlines():
@@ -137,7 +141,7 @@ def branch_merged(path, branch, target_branch):
 
 
 def worktree_dirty(path):
-    return bool(run(["git", "-C", str(path), "status", "--porcelain"], check=False))
+    return bool(run(["git", "-C", str(path), "status", "--porcelain"]))
 
 
 def remove_linked_worktree(path, workspace_root, *, source_path=None, force=False):

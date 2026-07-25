@@ -671,8 +671,42 @@ def test_doctor_fix_skips_vscode_json_for_cleanup_done_workspace(tmp, workspace_
         raise AssertionError(f"Expected cleanupStatus to remain done, got {after}")
 
 
+def test_rejects_workspace_id_and_repo_path_traversal(tmp, workspace_cli):
+    config_path = tmp / "config.yaml"
+    env = write_config(config_path, tmp, workspace_cli)
+    make_source_repo(tmp, name="repo")
+
+    escape_marker = tmp / "escape.code-workspace"
+    for bad_id in ("../escape", "a/b", "..", "sub/../../escape"):
+        result = run(
+            [str(workspace_cli), "create", bad_id, "--title", "Bad"],
+            env=env,
+            check=False,
+        )
+        if result.returncode == 0:
+            raise AssertionError(f"Expected create to reject workspace id {bad_id!r}")
+        assert_contains(result.stderr, "Invalid workspace id")
+
+    # A rejected id must not have written anything outside the ledger root.
+    if escape_marker.exists():
+        raise AssertionError("Traversal workspace id escaped the workspace root")
+    if list((tmp / "ledger").glob("**/escape*")):
+        raise AssertionError("Traversal workspace id wrote outside the workspaces dir")
+
+    run([str(workspace_cli), "create", "GOOD-1", "--title", "Good"], env=env)
+    bad_repo = run(
+        [str(workspace_cli), "repo", "add", "GOOD-1", "../repo"],
+        env=env,
+        check=False,
+    )
+    if bad_repo.returncode == 0:
+        raise AssertionError("Expected repo add to reject a traversal repo name")
+    assert_contains(bad_repo.stderr, "Invalid repo name")
+
+
 BASE_TESTS = [
     test_config_and_ledger_workspace,
+    test_rejects_workspace_id_and_repo_path_traversal,
     test_worktree_adopt_status_note_close,
     test_adopt_external_worktree_pointer_and_doctor,
     test_list_json_and_ids_only_flags,

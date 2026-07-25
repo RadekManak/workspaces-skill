@@ -8,9 +8,28 @@ from disk.
 """
 from pathlib import Path
 
-from workspaces.common import run
+from workspaces.common import run, validate_repo_name, write_workspace_pointer
 from workspaces.git import git_info, remove_linked_worktree
 from workspaces.ledger import WorkspaceLedger
+
+
+def repo_entry(config, info, *, name=None, **overrides):
+    """Build a workspace repo entry from `git_info` output plus config defaults.
+
+    `overrides` wins over every derived field, for callers that must record a
+    path or name other than the one git reported.
+    """
+    return {
+        "name": name or info["name"],
+        "worktreePath": info["root"],
+        "branch": info["branch"],
+        "baseRemote": config["base_remote"],
+        "baseBranch": config["base_branch"],
+        "pushRemote": config["push_remote"],
+        "remote": info["remote"],
+        "forkRemote": info["forkRemote"],
+        **overrides,
+    }
 
 
 def select_repo(workspace, repo_name=None):
@@ -26,10 +45,10 @@ def select_repo(workspace, repo_name=None):
 
 
 def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
+    repo_name = validate_repo_name(repo_name)
     workspace_id = workspace.id
     workspace_root = WorkspaceLedger(config).workspace_root_path(workspace_id)
-    workspace_root.mkdir(parents=True, exist_ok=True)
-    (workspace_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
+    write_workspace_pointer(workspace_root, workspace_id)
     source = Path(config["source_root"]) / repo_name
     dest = workspace_root / repo_name
     if not source.exists():
@@ -64,17 +83,13 @@ def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
         )
     info = git_info(dest, config)
     workspace.upsert_repo(
-        {
-            "name": repo_name,
-            "sourcePath": str(source),
-            "worktreePath": str(dest),
-            "branch": info["branch"],
-            "baseRemote": config["base_remote"],
-            "baseBranch": config["base_branch"],
-            "pushRemote": config["push_remote"],
-            "remote": info["remote"],
-            "forkRemote": info["forkRemote"],
-        },
+        repo_entry(
+            config,
+            info,
+            name=repo_name,
+            sourcePath=str(source),
+            worktreePath=str(dest),
+        ),
     )
     return dest
 

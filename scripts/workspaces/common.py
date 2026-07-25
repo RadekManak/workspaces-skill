@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,8 @@ DEFAULT_CONFIG = {
     "editor_command": "code",
 }
 
+WORKSPACE_POINTER = ".workspace-id"
+
 DONE_STATES = {"closed", "dev-complete"}
 STATE_ORDER = {
     "review-feedback": 0,
@@ -38,8 +41,17 @@ STATE_ORDER = {
 }
 
 
+def warn(message):
+    print(f"Warning: {message}", file=sys.stderr)
+
+
 def now():
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def timestamp_slug():
+    """Filename-safe local timestamp used to name generated run artifacts."""
+    return dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
 
 
 def expand(value):
@@ -55,8 +67,15 @@ def write_yaml(path, data):
 
 
 def read_yaml(path):
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    path = Path(path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as error:
+        raise SystemExit(f"Invalid YAML in {path}:\n{error}") from error
+    if not isinstance(data, dict):
+        raise SystemExit(f"Expected a YAML mapping in {path}, got {type(data).__name__}")
+    return data
 
 
 def write_json(path, data):
@@ -65,12 +84,22 @@ def write_json(path, data):
 
 
 def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def repo_projection(repo, *fields):
-    """Project a repo dict down to a plan/runner-safe subset of fields."""
-    return {field: repo.get(field) for field in fields}
+def parse_json(text, default=None):
+    """Parse `text` as JSON, returning `default` when it is empty or malformed."""
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return default
+
+
+def project(data, *fields):
+    """Project a dict down to a fixed subset of fields, defaulting missing ones to None."""
+    return {field: data.get(field) for field in fields}
 
 
 def repo_identity_snapshot(repos):
@@ -91,6 +120,43 @@ def repo_identity_snapshot(repos):
     )
 
 
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def validate_workspace_id(workspace_id):
+    """Validate a workspace id used to build ledger/workspace filesystem paths.
+
+    Workspace ids are joined onto trusted roots (`ledger_root`, `workspace_root`)
+    to derive read/write/delete paths, so an id containing path separators or
+    `..` segments would let an operation escape those roots. Reject anything that
+    is not a plain identifier before it can reach the filesystem.
+    """
+    text = str(workspace_id or "").strip()
+    if not _WORKSPACE_ID_RE.fullmatch(text):
+        raise SystemExit(
+            f"Invalid workspace id: {workspace_id!r}. Use letters, digits, '.', '_', or '-' "
+            "and no path separators."
+        )
+    return text
+
+
+def validate_repo_name(repo_name):
+    """Validate a repo name that is joined onto `source_root`/`workspace_root`.
+
+    Mirrors `validate_workspace_id`: the name becomes a path segment for the
+    source checkout and worktree destination, so path separators or `..`
+    segments must be rejected to keep both inside their intended roots.
+    """
+    text = str(repo_name or "").strip()
+    if not _REPO_NAME_RE.fullmatch(text):
+        raise SystemExit(
+            f"Invalid repo name: {repo_name!r}. Use letters, digits, '.', '_', or '-' "
+            "and no path separators."
+        )
+    return text
+
+
 def slug(value):
     text = str(value).strip().lower()
     text = re.sub(r"[^a-z0-9._-]+", "-", text)
@@ -109,8 +175,30 @@ def run(cmd, cwd=None, check=True, capture=True):
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        raise SystemExit(f"Command failed: {' '.join(cmd)}\n{stderr}")
+        printable = " ".join(str(part) for part in cmd)
+        raise SystemExit(
+            f"Command failed (exit {proc.returncode}): {printable}"
+            + (f"\n{stderr}" if stderr else "")
+        )
     return (proc.stdout or "").strip()
+
+
+def read_workspace_pointer(start):
+    """Return the workspace id from the nearest `.workspace-id` at or above `start`."""
+    current = Path(start).resolve()
+    for parent in [current, *current.parents]:
+        pointer = parent / WORKSPACE_POINTER
+        if pointer.exists():
+            return pointer.read_text(encoding="utf-8").strip()
+    return None
+
+
+def write_workspace_pointer(root, workspace_id):
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    pointer = root / WORKSPACE_POINTER
+    pointer.write_text(workspace_id + "\n", encoding="utf-8")
+    return pointer
 
 
 def relative_or_absolute(path, base):

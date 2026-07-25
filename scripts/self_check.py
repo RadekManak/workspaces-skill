@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,5 +31,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
+        traceback.print_exc()
         print(f"self-check failed: {error}", file=sys.stderr)
         sys.exit(1)

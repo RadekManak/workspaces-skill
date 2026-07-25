@@ -12,11 +12,12 @@ from tests import support
 from tests.support import ROOT, assert_contains, make_source_repo, run
 
 from workspaces import doctor
+from workspaces import git
 from workspaces import github_sync
 from workspaces import issues as issue_model
 from workspaces import repo
 from workspaces import sandcastle_reconcile
-from workspaces.common import DEFAULT_CONFIG
+from workspaces.common import DEFAULT_CONFIG, read_yaml
 from workspaces.ledger import WorkspaceLedger
 from workspaces.workspace_model import Workspace
 
@@ -486,9 +487,9 @@ def test_sandcastle_reconcile_apply_result_updates_issue_status_and_notes():
             encoding="utf-8",
         )
 
-        applied = sandcastle_reconcile.apply_sandcastle_result(config, "SC-RECONCILE", str(result_path))
-        if len(applied) != 1:
-            raise AssertionError(f"Expected exactly one applied update, got {applied}")
+        result = sandcastle_reconcile.apply_sandcastle_result(config, "SC-RECONCILE", str(result_path))
+        if len(result.applied) != 1 or result.failures:
+            raise AssertionError(f"Expected exactly one applied update and no failures, got {result}")
 
         issue = issue_model.read_issue(ledger.issue_path("SC-RECONCILE", "1"))
         if issue["meta"]["status"] != "merged":
@@ -527,9 +528,11 @@ def test_sandcastle_reconcile_apply_result_isolates_bad_entries():
             encoding="utf-8",
         )
 
-        applied = sandcastle_reconcile.apply_sandcastle_result(config, "SC-ISOLATE", str(result_path))
-        if len(applied) != 1:
-            raise AssertionError(f"Expected the valid entry to still be applied, got {applied}")
+        result = sandcastle_reconcile.apply_sandcastle_result(config, "SC-ISOLATE", str(result_path))
+        if len(result.applied) != 1:
+            raise AssertionError(f"Expected the valid entry to still be applied, got {result.applied}")
+        if len(result.failures) != 1:
+            raise AssertionError(f"Expected the bad entry to be reported as a failure, got {result.failures}")
 
         issue = issue_model.read_issue(ledger.issue_path("SC-ISOLATE", "1"))
         if issue["meta"]["status"] != "merged":
@@ -585,6 +588,89 @@ def test_sandcastle_reconcile_init_runner_writes_template_files():
             raise AssertionError(f"Expected force=True to rewrite all template files, got {written_again}")
 
 
+def test_github_sync_sync_prs_reports_failed_gh_query():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        workspace = Workspace(
+            {
+                "id": "GH-FAIL",
+                "repos": [{"name": "app", "worktreePath": str(tmp_dir)}],
+            }
+        )
+
+        def failing_run(cmd, **kwargs):
+            raise SystemExit("Command failed (exit 4): gh pr list\ngh: not authenticated")
+
+        original_run = github_sync.run
+        original_which = github_sync.shutil.which
+        original_git_info = github_sync.git_info
+        github_sync.run = failing_run
+        github_sync.shutil.which = lambda *args, **kwargs: "/usr/bin/gh"
+        github_sync.git_info = lambda *args, **kwargs: {
+            "branch": "feature",
+            "remote": "https://github.com/org/app.git",
+        }
+        try:
+            seen, failures = github_sync.sync_prs(DEFAULT_CONFIG, workspace)
+        finally:
+            github_sync.run = original_run
+            github_sync.shutil.which = original_which
+            github_sync.git_info = original_git_info
+
+        if seen:
+            raise AssertionError(f"Expected no PR snapshots from a failing gh query, got {seen}")
+        if len(failures) != 1 or failures[0]["repo"] != "app":
+            raise AssertionError(f"Expected the failed repo to be reported, got {failures}")
+        assert_contains(failures[0]["error"], "not authenticated")
+
+
+def test_issue_read_issue_rejects_unreadable_frontmatter():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        for name, text in {
+            "no-frontmatter.md": "## What to build\n\nTBD.\n",
+            "unclosed.md": "---\nid: 1\nstatus: merged\n",
+            "not-a-mapping.md": "---\n- 1\n- 2\n---\nbody\n",
+            "invalid-yaml.md": "---\nid: [1\n---\nbody\n",
+        }.items():
+            path = tmp_dir / name
+            path.write_text(text, encoding="utf-8")
+            try:
+                issue_model.read_issue(path)
+                raise AssertionError(f"Expected read_issue to reject {name}")
+            except SystemExit as error:
+                assert_contains(str(error), name)
+
+
+def test_read_yaml_rejects_invalid_and_non_mapping_documents():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        invalid = tmp_dir / "invalid.yaml"
+        invalid.write_text("id: [1\n", encoding="utf-8")
+        try:
+            read_yaml(invalid)
+            raise AssertionError("Expected read_yaml to reject invalid YAML")
+        except SystemExit as error:
+            assert_contains(str(error), str(invalid))
+
+        sequence = tmp_dir / "sequence.yaml"
+        sequence.write_text("- one\n- two\n", encoding="utf-8")
+        try:
+            read_yaml(sequence)
+            raise AssertionError("Expected read_yaml to reject a non-mapping document")
+        except SystemExit as error:
+            assert_contains(str(error), str(sequence))
+
+
+def test_worktree_dirty_propagates_git_failure():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        try:
+            git.worktree_dirty(Path(tmp_dir))
+            raise AssertionError("Expected worktree_dirty to raise when git status fails")
+        except SystemExit as error:
+            assert_contains(str(error), "Command failed")
+
+
 WORKSPACE_MODEL_TESTS = [
     test_workspace_model_state_roundtrip,
     test_workspace_model_repo_upsert_dedups_by_worktree_path_or_name,
@@ -609,6 +695,10 @@ WORKSPACE_MODEL_TESTS = [
     test_sandcastle_reconcile_apply_result_isolates_bad_entries,
     test_sandcastle_reconcile_apply_result_raises_when_all_entries_fail,
     test_sandcastle_reconcile_init_runner_writes_template_files,
+    test_github_sync_sync_prs_reports_failed_gh_query,
+    test_issue_read_issue_rejects_unreadable_frontmatter,
+    test_read_yaml_rejects_invalid_and_non_mapping_documents,
+    test_worktree_dirty_propagates_git_failure,
 ]
 
 

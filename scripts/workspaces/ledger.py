@@ -4,7 +4,18 @@ import json
 import os
 from pathlib import Path
 
-from .common import now, read_json, read_yaml, relative_or_absolute, slug, template, write_json, write_yaml
+from .common import (
+    now,
+    read_json,
+    read_yaml,
+    relative_or_absolute,
+    slug,
+    template,
+    validate_workspace_id,
+    warn,
+    write_json,
+    write_yaml,
+)
 from .sandcastle_state import maybe_invalidate_plan_for_repo_change
 from .workspace_model import Workspace
 
@@ -14,12 +25,14 @@ class WorkspaceLedger:
         self.config = config
 
     def ledger_dir(self, workspace_id):
+        workspace_id = validate_workspace_id(workspace_id)
         return Path(self.config["ledger_root"]) / "workspaces" / workspace_id
 
     def workspace_yaml_path(self, workspace_id):
         return self.ledger_dir(workspace_id) / "workspace.yaml"
 
     def workspace_root_path(self, workspace_id):
+        workspace_id = validate_workspace_id(workspace_id)
         return Path(self.config["workspace_root"]) / workspace_id
 
     def vscode_workspace_path(self, workspace_id):
@@ -41,12 +54,18 @@ class WorkspaceLedger:
         lock_path = self.sandcastle_lock_path(workspace_id)
         if not lock_path.exists():
             return False
+        # A lock we cannot read tells us nothing about a running process, so it
+        # is reported as inactive (otherwise the workspace would be permanently
+        # deadlocked) -- but never silently, since it also means a genuinely
+        # running Sandcastle execution would no longer be detected.
         try:
             lock = read_json(lock_path)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            warn(f"Ignoring unreadable Sandcastle lock {lock_path}: {error}")
             return False
         pid = lock.get("pid")
         if not isinstance(pid, int):
+            warn(f"Ignoring Sandcastle lock without a valid pid: {lock_path}")
             return False
         try:
             os.kill(pid, 0)
@@ -157,8 +176,10 @@ class WorkspaceLedger:
             return
         for meta in sorted(workspaces.glob("*/workspace.yaml")):
             data = read_yaml(meta)
-            if data.get("id"):
-                yield Workspace(data)
+            if not data.get("id"):
+                warn(f"Skipping workspace metadata without an `id`: {meta}")
+                continue
+            yield Workspace(data)
 
     def save(self, workspace):
         workspace_id = workspace.id
@@ -219,8 +240,7 @@ class WorkspaceLedger:
 
     def write_vscode_workspace(self, workspace):
         path, payload = self.build_vscode_workspace(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_json(path, payload)
         return path
 
     def append_note(self, workspace_id, text):

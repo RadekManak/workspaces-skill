@@ -22,7 +22,10 @@ from workspaces.common import (
     SKILL_ROOT,
     STATE_ORDER,
     expand,
+    read_workspace_pointer,
     read_yaml,
+    warn,
+    write_workspace_pointer,
 )
 from workspaces.git import (
     git_info,
@@ -36,11 +39,13 @@ from workspaces.repo import (
     add_source_repo_to_workspace,
     refresh_repo,
     remove_repo_worktree,
+    repo_entry,
     select_repo,
 )
 from workspaces.sandcastle_execute import execute_plan, format_execute_summary, resolve_execution_plan
 from workspaces.sandcastle_plan import plan_workspace, select_plan_repos
 from workspaces.ledger import WorkspaceLedger
+from workspaces.table import print_table
 
 
 CONFIG_PATH = Path(os.environ.get("WORKSPACES_CONFIG", DEFAULT_CONFIG_PATH)).expanduser()
@@ -55,13 +60,31 @@ SANDCASTLE_DESCRIPTION = (
     "Manage local workspace ledger with Sandcastle execution extensions."
 )
 
+WORKSPACE_COLUMNS = [
+    ("ID", 32),
+    ("STATE", 19),
+    ("UPDATED", 10),
+    ("REPOS", 24),
+    ("LOCAL", 12),
+    ("PRS", 3),
+    ("TITLE", None),
+]
+REPO_COLUMNS = [("NAME", 24), ("BRANCH", 24), ("PATH", None)]
+ISSUE_COLUMNS = [("ID", 16), ("STATUS", 12), ("BLOCKED BY", 18), ("TITLE", None)]
+SANDCASTLE_ISSUE_COLUMNS = [
+    ("ID", 16),
+    ("TYPE", 4),
+    ("STATUS", 12),
+    ("BLOCKED BY", 18),
+    ("REVIEW", 12),
+    ("TITLE", None),
+]
+
 
 def load_config():
     config = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-        config.update(loaded)
+        config.update(read_yaml(CONFIG_PATH))
     for key in ("source_root", "workspace_root", "ledger_root"):
         config[key] = expand(config[key])
     return config
@@ -125,7 +148,10 @@ def print_vscode_workspace_block(config, workspace):
     path = vscode_workspace_path(config, workspace.id)
     if not path.exists():
         path = write_vscode_workspace(config, workspace)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Invalid VS Code workspace JSON: {path}\n{error}") from error
     print(json.dumps(payload, indent=2))
 
 
@@ -243,8 +269,16 @@ def cmd_sandcastle_init_runner(args):
 def cmd_sandcastle_reconcile_result(args):
     config = load_config()
     load_workspace(config, args.id)
-    applied = sandcastle_reconcile.apply_sandcastle_result(config, args.id, args.result_path)
-    print(f"Reconciled {len(applied)} issue update(s).")
+    result = sandcastle_reconcile.apply_sandcastle_result(config, args.id, args.result_path)
+    print(f"Reconciled {len(result.applied)} issue update(s).")
+    if result.failures:
+        for index, update, error in result.failures:
+            entry_id = update.get("id") if isinstance(update, dict) else None
+            warn(f"Result entry {index} (id={entry_id!r}) failed to apply: {error}")
+        raise SystemExit(
+            f"{len(result.failures)} Sandcastle result entr"
+            f"{'y' if len(result.failures) == 1 else 'ies'} could not be applied."
+        )
 
 
 def cmd_sandcastle_execute(args):
@@ -385,11 +419,9 @@ def cleanup_item(config, item, repo_name=None):
 
 
 def infer_workspace_id(path, info):
-    current = Path(path).resolve()
-    for parent in [current] + list(current.parents):
-        pointer = parent / ".workspace-id"
-        if pointer.exists():
-            return pointer.read_text(encoding="utf-8").strip()
+    pointed = read_workspace_pointer(path)
+    if pointed:
+        return pointed
     branch = info.get("branch") or ""
     jira = re.search(r"[A-Z][A-Z0-9]+-\d+", branch)
     if jira:
@@ -456,22 +488,9 @@ def cmd_adopt(args):
     info = git_info(args.path, config)
     workspace_id = args.id or infer_workspace_id(args.path, info)
     workspace = ensure_workspace(config, workspace_id, args.title, "in-progress")
-    workspace.upsert_repo(
-        {
-            "name": args.name or Path(info["root"]).name,
-            "worktreePath": info["root"],
-            "branch": info["branch"],
-            "baseRemote": config["base_remote"],
-            "baseBranch": config["base_branch"],
-            "pushRemote": config["push_remote"],
-            "remote": info["remote"],
-            "forkRemote": info["forkRemote"],
-        },
-    )
+    workspace.upsert_repo(repo_entry(config, info, name=args.name))
     save_workspace(config, workspace)
-    ws_root = workspace_root_path(config, workspace_id)
-    ws_root.mkdir(parents=True, exist_ok=True)
-    (ws_root / ".workspace-id").write_text(workspace_id + "\n", encoding="utf-8")
+    write_workspace_pointer(workspace_root_path(config, workspace_id), workspace_id)
     append_note(config, workspace_id, f"Adopted worktree `{info['root']}` on branch `{info['branch']}`.")
     print(workspace_id)
     print_vscode_workspace_block(config, workspace)
@@ -487,9 +506,13 @@ def cmd_repo_list(args):
     if not repos:
         print("No repos found.")
         return
-    print(f"{'NAME':24} {'BRANCH':24} PATH")
-    for repo in repos:
-        print(f"{str(repo.get('name') or '')[:24]:24} {str(repo.get('branch') or '')[:24]:24} {repo.get('worktreePath') or ''}")
+    print_table(
+        REPO_COLUMNS,
+        [
+            (repo.get("name"), repo.get("branch"), repo.get("worktreePath"))
+            for repo in repos
+        ],
+    )
 
 
 def cmd_repo_add(args):
@@ -506,18 +529,7 @@ def cmd_repo_adopt(args):
     config = load_config()
     workspace = load_workspace(config, args.id)
     info = git_info(args.path, config)
-    workspace.upsert_repo(
-        {
-            "name": args.name or Path(info["root"]).name,
-            "worktreePath": info["root"],
-            "branch": info["branch"],
-            "baseRemote": config["base_remote"],
-            "baseBranch": config["base_branch"],
-            "pushRemote": config["push_remote"],
-            "remote": info["remote"],
-            "forkRemote": info["forkRemote"],
-        },
-    )
+    workspace.upsert_repo(repo_entry(config, info, name=args.name))
     save_workspace(config, workspace)
     append_note(config, args.id, f"Adopted repo `{info['root']}` on branch `{info['branch']}`.")
     print(info["root"])
@@ -554,10 +566,9 @@ def cmd_repo_refresh(args):
 
 def find_workspace_from_cwd(config):
     current = Path.cwd().resolve()
-    for parent in [current] + list(current.parents):
-        pointer = parent / ".workspace-id"
-        if pointer.exists():
-            return pointer.read_text(encoding="utf-8").strip()
+    pointed = read_workspace_pointer(current)
+    if pointed:
+        return pointed
     workspaces = Path(config["ledger_root"]) / "workspaces"
     if workspaces.exists():
         for meta in workspaces.glob("*/workspace.yaml"):
@@ -754,17 +765,21 @@ def cmd_list(args):
     scope = args.state or ("all" if args.all else "active")
     print(f"Workspaces ({scope}): {len(rows)}  {summary}")
     print("")
-    print(f"{'ID':32} {'STATE':19} {'UPDATED':10} {'REPOS':24} {'LOCAL':12} {'PRS':3} TITLE")
-    for row in rows:
-        print(
-            f"{row['id'][:32]:32} "
-            f"{row['state'][:19]:19} "
-            f"{row['updated'][:10]:10} "
-            f"{row['repos'][:24]:24} "
-            f"{row['local'][:12]:12} "
-            f"{row['prs'][:3]:3} "
-            f"{row['title']}"
-        )
+    print_table(
+        WORKSPACE_COLUMNS,
+        [
+            (
+                row["id"],
+                row["state"],
+                row["updated"],
+                row["repos"],
+                row["local"],
+                row["prs"],
+                row["title"],
+            )
+            for row in rows
+        ],
+    )
 
 
 def cmd_note(args):
@@ -792,26 +807,41 @@ def cmd_state(args):
     append_note(config, args.id, note)
 
 
-def print_issue_row(issue, *, sandcastle=False):
+def issue_columns(sandcastle):
+    return SANDCASTLE_ISSUE_COLUMNS if sandcastle else ISSUE_COLUMNS
+
+
+def issue_row(issue, *, sandcastle=False):
     meta = issue["meta"]
     blockers = ",".join(str(item) for item in meta.get("blockedBy") or []) or "-"
-    if sandcastle:
-        sc = sandcastle_issue_meta(meta)
-        print(
-            f"{str(meta.get('id', ''))[:16]:16} "
-            f"{str(sc.get('type', ''))[:4]:4} "
-            f"{str(meta.get('status', ''))[:12]:12} "
-            f"{blockers[:18]:18} "
-            f"{str(sc.get('reviewStatus', ''))[:12]:12} "
-            f"{meta.get('title', '')}"
-        )
-    else:
-        print(
-            f"{str(meta.get('id', ''))[:16]:16} "
-            f"{str(meta.get('status', ''))[:12]:12} "
-            f"{blockers[:18]:18} "
-            f"{meta.get('title', '')}"
-        )
+    if not sandcastle:
+        return (meta.get("id", ""), meta.get("status", ""), blockers, meta.get("title", ""))
+    sc = sandcastle_issue_meta(meta)
+    return (
+        meta.get("id", ""),
+        sc.get("type", ""),
+        meta.get("status", ""),
+        blockers,
+        sc.get("reviewStatus", ""),
+        meta.get("title", ""),
+    )
+
+
+def print_issue_table(issues, *, sandcastle=False):
+    columns = issue_columns(sandcastle)
+    print_table(columns, [issue_row(issue, sandcastle=sandcastle) for issue in issues])
+
+
+def ready_issue_payload(issue, *, branch=True, issue_type=False):
+    meta = issue["meta"]
+    payload = {"id": meta["id"], "title": meta["title"]}
+    if branch:
+        payload["branch"] = meta["branch"]
+    payload["status"] = meta["status"]
+    payload["path"] = str(issue["path"])
+    if issue_type:
+        payload["type"] = sandcastle_issue_meta(meta)["type"]
+    return payload
 
 
 def cmd_issue_create(args):
@@ -870,12 +900,7 @@ def cmd_issue_list(args):
     if not issues:
         print("No issues found.")
         return
-    if sandcastle:
-        print(f"{'ID':16} {'TYPE':4} {'STATUS':12} {'BLOCKED BY':18} {'REVIEW':12} TITLE")
-    else:
-        print(f"{'ID':16} {'STATUS':12} {'BLOCKED BY':18} TITLE")
-    for issue in issues:
-        print_issue_row(issue, sandcastle=sandcastle)
+    print_issue_table(issues, sandcastle=sandcastle)
 
 
 def cmd_issue_ready(args):
@@ -886,57 +911,25 @@ def cmd_issue_ready(args):
     if args.json:
         payload = {
             "issues": [
-                {
-                    "id": issue["meta"]["id"],
-                    "title": issue["meta"]["title"],
-                    "branch": issue["meta"]["branch"],
-                    "status": issue["meta"]["status"],
-                    "path": str(issue["path"]),
-                    **(
-                        {
-                            "type": sandcastle_issue_meta(issue["meta"])["type"],
-                        }
-                        if sandcastle
-                        else {}
-                    ),
-                }
-                for issue in ready
+                ready_issue_payload(issue, issue_type=sandcastle) for issue in ready
             ],
         }
         if sandcastle:
             payload["hitl"] = [
-                {
-                    "id": issue["meta"]["id"],
-                    "title": issue["meta"]["title"],
-                    "status": issue["meta"]["status"],
-                    "path": str(issue["path"]),
-                }
-                for issue in hitl
+                ready_issue_payload(issue, branch=False) for issue in hitl
             ]
         print(json.dumps(payload, indent=2))
         return
-    if sandcastle:
-        if ready:
-            print("Ready AFK issues:")
-            print(f"{'ID':16} {'TYPE':4} {'STATUS':12} {'BLOCKED BY':18} {'REVIEW':12} TITLE")
-            for issue in ready:
-                print_issue_row(issue, sandcastle=True)
-        else:
-            print("Ready AFK issues: none")
-        if hitl:
-            print("")
-            print("Ready HITL issues:")
-            print(f"{'ID':16} {'TYPE':4} {'STATUS':12} {'BLOCKED BY':18} {'REVIEW':12} TITLE")
-            for issue in hitl:
-                print_issue_row(issue, sandcastle=True)
+    label = "Ready AFK issues" if sandcastle else "Ready issues"
+    if ready:
+        print(f"{label}:")
+        print_issue_table(ready, sandcastle=sandcastle)
     else:
-        if ready:
-            print("Ready issues:")
-            print(f"{'ID':16} {'STATUS':12} {'BLOCKED BY':18} TITLE")
-            for issue in ready:
-                print_issue_row(issue, sandcastle=False)
-        else:
-            print("Ready issues: none")
+        print(f"{label}: none")
+    if sandcastle and hitl:
+        print("")
+        print("Ready HITL issues:")
+        print_issue_table(hitl, sandcastle=True)
 
 
 def cmd_issue_show(args):
@@ -1035,10 +1028,19 @@ def cmd_cleanup(args):
 def cmd_sync_github(args):
     config = load_config()
     workspace = load_workspace(config, args.id)
-    seen = github_sync.sync_prs(config, workspace)
+    seen, failures = github_sync.sync_prs(config, workspace)
     save_workspace(config, workspace)
-    append_note(config, args.id, f"Synced GitHub PR snapshots. Found {len(seen)} PR(s).")
+    note = f"Synced GitHub PR snapshots. Found {len(seen)} PR(s)."
+    if failures:
+        repos = ", ".join(str(failure["repo"]) for failure in failures)
+        note += f" Failed to query repo(s): {repos}."
+    append_note(config, args.id, note)
     print(f"Found {len(seen)} PR(s).")
+    if failures:
+        raise SystemExit(
+            f"Could not query GitHub for {len(failures)} repo(s); "
+            "recorded snapshots may be incomplete."
+        )
 
 
 def cmd_pr(args):
