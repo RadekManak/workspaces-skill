@@ -260,6 +260,22 @@ def test_base_issue_create_omits_sandcastle_fields(tmp):
         raise AssertionError(f"Base issue create should omit Sandcastle fields, got {issue}")
 
 
+def test_entrypoints_fail_cleanly_without_pyyaml(tmp):
+    # Shadow PyYAML with a module that always fails to import, so both
+    # entrypoints hit their shared dependency precondition.
+    shadow = tmp / "shadow"
+    shadow.mkdir()
+    (shadow / "yaml.py").write_text("raise ImportError('no yaml here')\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(shadow)}
+    for entrypoint in (WORKSPACE, WORKSPACE_SANDCASTLE):
+        proc = run([str(entrypoint), "list"], env=env, check=False)
+        if proc.returncode != 2:
+            raise AssertionError(
+                f"Expected {entrypoint.name} to exit 2 without PyYAML, got {proc.returncode}"
+            )
+        assert_contains(proc.stderr, "PyYAML is required")
+
+
 def test_open_identical_between_entrypoints(tmp):
     config_path = tmp / "config.yaml"
     env = write_config(config_path, tmp, WORKSPACE)
@@ -538,6 +554,7 @@ CLI_SPLIT_TESTS = [
     test_topology_commands_print_vscode_json,
     test_base_issue_create_omits_sandcastle_fields,
     test_issue_create_default_repo_single_repo_workspace,
+    test_entrypoints_fail_cleanly_without_pyyaml,
     test_open_identical_between_entrypoints,
     test_cross_entrypoint_issue_compat,
     test_sandcastle_issue_create_writes_nested_block,

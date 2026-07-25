@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests import support
-from tests.support import make_source_repo, run
+from tests.support import assert_contains, make_source_repo, run
 
 from workspaces import github_sync
 from workspaces.common import DEFAULT_CONFIG
@@ -21,7 +21,7 @@ def fake_gh(responses, *, available=True, calls=None):
     """Patch `gh` discovery and command execution inside `github_sync`.
 
     `responses` maps a marker found in the argv (e.g. a branch or PR number) to
-    the raw stdout `gh` should return.
+    the raw stdout `gh` should return, or to an exception it should raise.
     """
 
     def fake_run(cmd, *args, **kwargs):
@@ -29,6 +29,8 @@ def fake_gh(responses, *, available=True, calls=None):
             calls.append(cmd)
         for marker, raw in responses.items():
             if marker in cmd:
+                if isinstance(raw, BaseException):
+                    raise raw
                 return raw
         return ""
 
@@ -80,10 +82,12 @@ def test_github_sync_sync_prs_records_snapshots_per_repo():
         )
         calls = []
         with fake_gh({"feature": payload}, calls=calls):
-            seen = github_sync.sync_prs(_sync_test_config(), workspace)
+            seen, failures = github_sync.sync_prs(_sync_test_config(), workspace)
 
         if not calls or calls[0][:5] != ["gh", "pr", "list", "--repo", "org/app"]:
             raise AssertionError(f"Expected `gh pr list --repo org/app`, got {calls}")
+        if failures:
+            raise AssertionError(f"Expected no per-repo failures, got {failures}")
         if len(seen) != 1:
             raise AssertionError(f"Expected exactly one seen PR, got {seen}")
         item = seen[0]
@@ -116,7 +120,7 @@ def test_github_sync_sync_prs_marks_merged_from_merged_at():
             ]
         )
         with fake_gh({"feature": payload}):
-            seen = github_sync.sync_prs(_sync_test_config(), workspace)
+            seen, _ = github_sync.sync_prs(_sync_test_config(), workspace)
 
         if not seen[0]["merged"]:
             raise AssertionError(f"Expected mergedAt to mark the snapshot merged, got {seen}")
@@ -146,25 +150,61 @@ def test_github_sync_sync_prs_skips_repos_it_cannot_query():
 
         calls = []
         with fake_gh({}, calls=calls):
-            seen = github_sync.sync_prs(_sync_test_config(), workspace)
+            seen, failures = github_sync.sync_prs(_sync_test_config(), workspace)
 
+        if failures:
+            raise AssertionError(f"Expected no failures when no repo is queryable, got {failures}")
         if seen or workspace.github_prs:
             raise AssertionError(f"Expected no PR snapshots for unqueryable repos, got {seen}")
         if calls:
             raise AssertionError(f"Expected `gh` to never be invoked for unqueryable repos, got {calls}")
 
 
-def test_github_sync_sync_prs_tolerates_unparsable_gh_output():
+def test_github_sync_sync_prs_reports_unparsable_gh_output_as_a_failure():
     with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
         tmp_dir = Path(tmp_dir)
         source = _github_source_repo(tmp_dir, "app", "feature")
         workspace = Workspace({"id": "GH-BADJSON", "repos": [{"name": "app", "worktreePath": str(source)}]})
 
         with fake_gh({"feature": "not json"}):
-            seen = github_sync.sync_prs(_sync_test_config(), workspace)
+            seen, failures = github_sync.sync_prs(_sync_test_config(), workspace)
 
         if seen or workspace.github_prs:
             raise AssertionError(f"Expected unparsable `gh` output to yield no snapshots, got {seen}")
+        if [failure["repo"] for failure in failures] != ["app"]:
+            raise AssertionError(f"Expected the repo's failure to be reported, not swallowed, got {failures}")
+        assert_contains(failures[0]["error"], "as JSON")
+
+
+def test_github_sync_sync_prs_keeps_syncing_after_a_failing_repo():
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        broken = _github_source_repo(tmp_dir, "broken", "broken-branch")
+        healthy = _github_source_repo(tmp_dir, "healthy", "healthy-branch")
+        workspace = Workspace(
+            {
+                "id": "GH-PARTIAL",
+                "repos": [
+                    {"name": "broken", "worktreePath": str(broken)},
+                    {"name": "healthy", "worktreePath": str(healthy)},
+                ],
+            }
+        )
+
+        healthy_payload = json.dumps(
+            [{"number": 1, "url": "https://github.com/org/healthy/pull/1", "state": "OPEN"}]
+        )
+        responses = {
+            "broken-branch": SystemExit("gh: HTTP 401"),
+            "healthy-branch": healthy_payload,
+        }
+        with fake_gh(responses):
+            seen, failures = github_sync.sync_prs(_sync_test_config(), workspace)
+
+        if [item["repo"] for item in seen] != ["healthy"]:
+            raise AssertionError(f"Expected the healthy repo to still sync, got {seen}")
+        if [failure["repo"] for failure in failures] != ["broken"]:
+            raise AssertionError(f"Expected only the broken repo to be reported as failed, got {failures}")
 
 
 def test_github_sync_pr_view_command_prefers_url_then_repo_and_number():
@@ -295,7 +335,8 @@ GITHUB_SYNC_TESTS = [
     test_github_sync_sync_prs_records_snapshots_per_repo,
     test_github_sync_sync_prs_marks_merged_from_merged_at,
     test_github_sync_sync_prs_skips_repos_it_cannot_query,
-    test_github_sync_sync_prs_tolerates_unparsable_gh_output,
+    test_github_sync_sync_prs_reports_unparsable_gh_output_as_a_failure,
+    test_github_sync_sync_prs_keeps_syncing_after_a_failing_repo,
     test_github_sync_pr_view_command_prefers_url_then_repo_and_number,
     test_github_sync_refresh_recorded_prs_skips_unchanged_and_unviewable,
     test_github_sync_refresh_recorded_prs_ignores_unusable_gh_responses,
