@@ -306,6 +306,66 @@ def test_repo_add_fetches_base_before_worktree():
             raise AssertionError(f"Expected fetch to update origin/main to {fresh}, got {origin_after}")
 
 
+def test_repo_add_worktree_survives_failed_fetch():
+    """A failing base fetch must fall back to the local tip, not abort creation."""
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        source = make_source_repo(tmp_dir, "app")
+        local_tip = run(
+            ["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]
+        ).stdout.strip()
+        # Point origin at a path that cannot be fetched so `git fetch` fails.
+        run(["git", "-C", str(source), "remote", "set-url", "origin", str(tmp_dir / "gone")])
+
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("REPO-OFFLINE", title="Repo offline test")
+        dest = repo.add_source_repo_to_workspace(config, workspace, "app")
+
+        if not dest.exists():
+            raise AssertionError(f"Expected worktree created despite failed fetch at {dest}")
+        worktree_head = run(["git", "-C", str(dest), "rev-parse", "HEAD"]).stdout.strip()
+        if worktree_head != local_tip:
+            raise AssertionError(
+                f"Expected worktree based on local tip {local_tip} after failed fetch, got {worktree_head}"
+            )
+
+
+def test_repo_add_bases_on_fetch_head_when_tracking_ref_is_stale():
+    """With no fetch refspec, origin/<branch> stays stale; FETCH_HEAD must win."""
+    with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
+        tmp_dir = Path(tmp_dir)
+        source = make_source_repo(tmp_dir, "app")
+        stale = run(
+            ["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]
+        ).stdout.strip()
+        (source / "README.md").write_text("hello\nadvanced\n", encoding="utf-8")
+        run(["git", "-C", str(source), "add", "README.md"])
+        run(["git", "-C", str(source), "commit", "-m", "advance main"])
+        fresh = run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip()
+        # Drop origin's fetch refspec so `git fetch origin main` updates only
+        # FETCH_HEAD, never refs/remotes/origin/main.
+        run(["git", "-C", str(source), "config", "--unset-all", "remote.origin.fetch"])
+
+        config = _doctor_test_config(tmp_dir)
+        ledger = WorkspaceLedger(config)
+        workspace = ledger.ensure("REPO-NOREFSPEC", title="Repo no-refspec test")
+        dest = repo.add_source_repo_to_workspace(config, workspace, "app")
+
+        worktree_head = run(["git", "-C", str(dest), "rev-parse", "HEAD"]).stdout.strip()
+        if worktree_head != fresh:
+            raise AssertionError(
+                f"Expected worktree based on FETCH_HEAD {fresh}, got {worktree_head} (stale was {stale})"
+            )
+        origin_after = run(
+            ["git", "-C", str(source), "rev-parse", "refs/remotes/origin/main"]
+        ).stdout.strip()
+        if origin_after != stale:
+            raise AssertionError(
+                f"Expected origin/main to remain stale at {stale} without a refspec, got {origin_after}"
+            )
+
+
 def test_repo_refresh_repo_updates_git_metadata():
     with tempfile.TemporaryDirectory(prefix="workspaces-self-check-") as tmp_dir:
         tmp_dir = Path(tmp_dir)
@@ -686,6 +746,8 @@ WORKSPACE_MODEL_TESTS = [
     test_repo_select_repo_single_and_multi_and_named,
     test_repo_add_source_repo_creates_worktree_and_upserts,
     test_repo_add_fetches_base_before_worktree,
+    test_repo_add_worktree_survives_failed_fetch,
+    test_repo_add_bases_on_fetch_head_when_tracking_ref_is_stale,
     test_repo_refresh_repo_updates_git_metadata,
     test_github_sync_apply_pr_event_maps_state_and_records_pr,
     test_github_sync_sync_prs_raises_when_gh_missing,

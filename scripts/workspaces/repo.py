@@ -8,8 +8,8 @@ from disk.
 """
 from pathlib import Path
 
-from workspaces.common import run, validate_repo_name, write_workspace_pointer
-from workspaces.git import git_info, remove_linked_worktree
+from workspaces.common import run, validate_repo_name, warn, write_workspace_pointer
+from workspaces.git import git_info, git_success, remove_linked_worktree
 from workspaces.ledger import WorkspaceLedger
 
 
@@ -55,18 +55,26 @@ def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
         raise SystemExit(f"Source repo not found: {source}")
     if not dest.exists():
         base_ref = f"{config['base_remote']}/{config['base_branch']}"
-        # Refresh the local remote-tracking ref so new worktrees are not based on a stale tip.
-        run(
-            [
-                "git",
-                "-C",
-                str(source),
-                "fetch",
-                config["base_remote"],
-                config["base_branch"],
-            ],
-            capture=True,
+        # Refresh the base branch so the new worktree is not based on a stale
+        # tip. The fetch is best-effort: an offline or unauthenticated source
+        # repo must still be able to branch off its last-known local tip
+        # instead of aborting workspace creation.
+        fetched = git_success(
+            source,
+            ["fetch", config["base_remote"], config["base_branch"]],
         )
+        if fetched:
+            # Base on the just-fetched tip. The remote-tracking ref (base_ref)
+            # only advances when a matching fetch refspec is configured, so a
+            # single-branch or custom-refspec clone would otherwise silently
+            # reuse a stale tip even after a successful fetch.
+            start_point = "FETCH_HEAD"
+        else:
+            warn(
+                f"Could not fetch {base_ref} in {source}; "
+                "basing the new worktree on the last-known local tip"
+            )
+            start_point = base_ref
         run(
             [
                 "git",
@@ -77,7 +85,7 @@ def add_source_repo_to_workspace(config, workspace, repo_name, branch=None):
                 "-b",
                 branch or workspace_id,
                 str(dest),
-                base_ref,
+                start_point,
             ],
             capture=True,
         )

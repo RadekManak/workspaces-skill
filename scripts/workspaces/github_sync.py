@@ -21,6 +21,7 @@ from workspaces.common import now, project, run, warn
 from workspaces.git import git_info, github_repo_from_remote
 
 
+_GH_TIMEOUT_SECONDS = 60
 _PR_VIEW_FIELDS = "number,url,state,mergedAt,title,headRefName"
 _PR_SNAPSHOT_FIELDS = ("number", "url", "branch", "state", "merged", "title")
 _PR_URL_RE = re.compile(
@@ -32,10 +33,11 @@ _PR_URL_RE = re.compile(
 def _gh_json(cmd):
     """Run a `gh ... --json` command, returning its decoded payload.
 
-    Raises `SystemExit` with the command's stderr when `gh` fails, and with the
-    decode error when it succeeds but returns something that is not JSON.
+    Raises `SystemExit` with the command's stderr when `gh` fails, when it does
+    not finish within `_GH_TIMEOUT_SECONDS`, and with the decode error when it
+    succeeds but returns something that is not JSON.
     """
-    raw = run(cmd)
+    raw = run(cmd, timeout=_GH_TIMEOUT_SECONDS)
     if not raw:
         return None
     try:
