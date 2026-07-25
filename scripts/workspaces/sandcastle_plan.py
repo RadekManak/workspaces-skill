@@ -1,9 +1,8 @@
 """Sandcastle planning: multi-repo classification and dependency-ordered execution graph."""
-import datetime as dt
 import hashlib
 import json
 
-from .common import now, repo_identity_snapshot, repo_projection, write_json
+from .common import now, project, repo_identity_snapshot, timestamp_slug, write_json
 from .issues import (
     ISSUE_ACTIVE_STATUSES,
     ISSUE_DONE_STATUSES,
@@ -300,7 +299,7 @@ def build_plan_view(ledger, workspace_id, all_repos, scope_repos, *, limit=None)
 
 
 def repo_record(repo):
-    return repo_projection(repo, "name", "worktreePath", "branch", "remote")
+    return project(repo, "name", "worktreePath", "branch", "remote")
 
 
 def write_plan_artifact(workspace, repos, view, *, ledger_dir, runs_dir):
@@ -332,8 +331,7 @@ def write_plan_artifact(workspace, repos, view, *, ledger_dir, runs_dir):
         },
         "fingerprint": view["fingerprint"],
     }
-    stamp = dt.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
-    path = runs_dir / f"sandcastle-plan-{stamp}.json"
+    path = runs_dir / f"sandcastle-plan-{timestamp_slug()}.json"
     write_json(path, payload)
     return path, payload
 
