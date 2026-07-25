@@ -237,8 +237,7 @@ class WorkspaceLedger:
 
     def write_vscode_workspace(self, workspace):
         path, payload = self.build_vscode_workspace(workspace)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_json(path, payload)
         return path
 
     def append_note(self, workspace_id, text):

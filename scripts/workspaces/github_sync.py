@@ -17,11 +17,12 @@ import re
 import shutil
 from pathlib import Path
 
-from workspaces.common import now, run, warn
+from workspaces.common import now, project, run, warn
 from workspaces.git import git_info, github_repo_from_remote
 
 
 _PR_VIEW_FIELDS = "number,url,state,mergedAt,title,headRefName"
+_PR_SNAPSHOT_FIELDS = ("number", "url", "branch", "state", "merged", "title")
 _PR_URL_RE = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/(?P<repo>[^/]+/[^/]+)/pull/(?P<number>\d+)",
     re.IGNORECASE,
@@ -159,22 +160,8 @@ def refresh_recorded_prs(workspace):
             "lastSeenAt": now(),
             "title": live.get("title"),
         }
-        before = {
-            "state": pr.get("state"),
-            "merged": bool(pr.get("merged")),
-            "title": pr.get("title"),
-            "branch": pr.get("branch"),
-            "url": pr.get("url"),
-            "number": pr.get("number"),
-        }
-        after = {
-            "state": item["state"],
-            "merged": item["merged"],
-            "title": item["title"],
-            "branch": item["branch"],
-            "url": item["url"],
-            "number": item["number"],
-        }
+        before = {**project(pr, *_PR_SNAPSHOT_FIELDS), "merged": bool(pr.get("merged"))}
+        after = project(item, *_PR_SNAPSHOT_FIELDS)
         if before == after:
             continue
         workspace.update_github_pr_snapshot(index, item)

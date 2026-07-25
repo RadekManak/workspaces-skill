@@ -4,14 +4,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
-    import yaml  # noqa: F401
-except ImportError:
-    print("PyYAML is required: python3 -m pip install pyyaml", file=sys.stderr)
-    sys.exit(2)
-
-from workspaces.cli import main
+from workspaces.entrypoint import run
 
 
 if __name__ == "__main__":
-    main(sandcastle=False, prog="workspace.py")
+    run(sandcastle=False, prog="workspace.py")
