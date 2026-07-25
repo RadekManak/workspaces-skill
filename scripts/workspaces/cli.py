@@ -23,6 +23,7 @@ from workspaces.common import (
     STATE_ORDER,
     expand,
     read_yaml,
+    warn,
 )
 from workspaces.git import (
     git_info,
@@ -59,9 +60,7 @@ SANDCASTLE_DESCRIPTION = (
 def load_config():
     config = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
-            loaded = yaml.safe_load(f) or {}
-        config.update(loaded)
+        config.update(read_yaml(CONFIG_PATH))
     for key in ("source_root", "workspace_root", "ledger_root"):
         config[key] = expand(config[key])
     return config
@@ -125,7 +124,10 @@ def print_vscode_workspace_block(config, workspace):
     path = vscode_workspace_path(config, workspace.id)
     if not path.exists():
         path = write_vscode_workspace(config, workspace)
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Invalid VS Code workspace JSON: {path}\n{error}") from error
     print(json.dumps(payload, indent=2))
 
 
@@ -243,8 +245,16 @@ def cmd_sandcastle_init_runner(args):
 def cmd_sandcastle_reconcile_result(args):
     config = load_config()
     load_workspace(config, args.id)
-    applied = sandcastle_reconcile.apply_sandcastle_result(config, args.id, args.result_path)
-    print(f"Reconciled {len(applied)} issue update(s).")
+    result = sandcastle_reconcile.apply_sandcastle_result(config, args.id, args.result_path)
+    print(f"Reconciled {len(result.applied)} issue update(s).")
+    if result.failures:
+        for index, update, error in result.failures:
+            entry_id = update.get("id") if isinstance(update, dict) else None
+            warn(f"Result entry {index} (id={entry_id!r}) failed to apply: {error}")
+        raise SystemExit(
+            f"{len(result.failures)} Sandcastle result entr"
+            f"{'y' if len(result.failures) == 1 else 'ies'} could not be applied."
+        )
 
 
 def cmd_sandcastle_execute(args):
@@ -1035,10 +1045,19 @@ def cmd_cleanup(args):
 def cmd_sync_github(args):
     config = load_config()
     workspace = load_workspace(config, args.id)
-    seen = github_sync.sync_prs(config, workspace)
+    seen, failures = github_sync.sync_prs(config, workspace)
     save_workspace(config, workspace)
-    append_note(config, args.id, f"Synced GitHub PR snapshots. Found {len(seen)} PR(s).")
+    note = f"Synced GitHub PR snapshots. Found {len(seen)} PR(s)."
+    if failures:
+        repos = ", ".join(str(failure["repo"]) for failure in failures)
+        note += f" Failed to query repo(s): {repos}."
+    append_note(config, args.id, note)
     print(f"Found {len(seen)} PR(s).")
+    if failures:
+        raise SystemExit(
+            f"Could not query GitHub for {len(failures)} repo(s); "
+            "recorded snapshots may be incomplete."
+        )
 
 
 def cmd_pr(args):

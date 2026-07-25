@@ -7,13 +7,17 @@ its associated PR state transition (`apply_pr_event`).
 
 `refresh_recorded_prs` re-checks already-recorded snapshots via `gh pr view`
 so cleanup decisions are not stuck on stale OPEN entries.
+
+A failing or unparseable `gh` invocation is never treated as "this repo has no
+PRs": it is reported to the caller (and to stderr) so an auth/network problem
+cannot silently look like a clean, PR-free workspace.
 """
 import json
 import re
 import shutil
 from pathlib import Path
 
-from workspaces.common import now, run
+from workspaces.common import now, run, warn
 from workspaces.git import git_info, github_repo_from_remote
 
 
@@ -24,17 +28,38 @@ _PR_URL_RE = re.compile(
 )
 
 
+def _gh_json(cmd):
+    """Run a `gh ... --json` command, returning its decoded payload.
+
+    Raises `SystemExit` with the command's stderr when `gh` fails, and with the
+    decode error when it succeeds but returns something that is not JSON.
+    """
+    raw = run(cmd)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Could not parse `{' '.join(cmd)}` output as JSON: {error}") from error
+
+
 def sync_prs(config, workspace):
     """Gather `gh pr list` PR snapshots for each of `workspace`'s repos.
 
     Requires `gh` on PATH (raises `SystemExit` if missing, since that's a
     precondition of gathering rather than of CLI wiring). Records each seen
     PR onto `workspace` via `workspace.record_github_pr(...)`, mutating
-    `workspace` in place, and returns the list of seen PR dict items.
+    `workspace` in place.
+
+    Returns `(seen, failures)`: the list of seen PR dict items, and one
+    `{"repo", "error"}` entry per repo whose `gh` query failed. Failures are
+    per-repo so one broken repo still lets the others sync, but they are never
+    swallowed -- callers are expected to surface them.
     """
     if shutil.which("gh") is None:
         raise SystemExit("gh is not installed or not on PATH")
     seen = []
+    failures = []
     for repo in workspace.repos:
         path = repo.get("worktreePath")
         if not path or not Path(path).exists():
@@ -45,26 +70,26 @@ def sync_prs(config, workspace):
         full_name = github_repo_from_remote(remote or "")
         if not branch or not full_name:
             continue
-        raw = run(
-            [
-                "gh",
-                "pr",
-                "list",
-                "--repo",
-                full_name,
-                "--head",
-                branch,
-                "--json",
-                "number,url,state,isDraft,headRefName,baseRefName,mergedAt,title",
-                "--limit",
-                "10",
-            ],
-            check=False,
-        )
         try:
-            prs = json.loads(raw) if raw else []
-        except json.JSONDecodeError:
-            prs = []
+            prs = _gh_json(
+                [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--repo",
+                    full_name,
+                    "--head",
+                    branch,
+                    "--json",
+                    "number,url,state,isDraft,headRefName,baseRefName,mergedAt,title",
+                    "--limit",
+                    "10",
+                ]
+            ) or []
+        except SystemExit as error:
+            warn(f"Could not sync PRs for repo `{repo.get('name')}`: {error}")
+            failures.append({"repo": repo.get("name"), "error": str(error)})
+            continue
         for pr in prs:
             item = {
                 "repo": repo.get("name"),
@@ -79,7 +104,7 @@ def sync_prs(config, workspace):
             seen.append(item)
     for item in seen:
         workspace.record_github_pr(item)
-    return seen
+    return seen, failures
 
 
 def _pr_view_command(pr):
@@ -103,21 +128,25 @@ def refresh_recorded_prs(workspace):
     """Refresh recorded `githubPrs` snapshots via `gh pr view`.
 
     Soft-fails when `gh` is missing or a view fails: leaves that snapshot
-    unchanged. Returns True if any snapshot was updated.
+    unchanged, but warns on stderr so a stale OPEN snapshot is never mistaken
+    for a freshly confirmed one. Returns True if any snapshot was updated.
     """
     if shutil.which("gh") is None:
+        warn("gh is not installed or not on PATH; recorded PR snapshots were not refreshed")
         return False
     changed = False
     for index, pr in enumerate(workspace.github_prs):
         cmd = _pr_view_command(pr)
         if not cmd:
+            warn(f"Skipping PR snapshot without a usable url/repo+number: {pr}")
             continue
-        raw = run(cmd, check=False)
         try:
-            live = json.loads(raw) if raw else None
-        except json.JSONDecodeError:
-            live = None
+            live = _gh_json(cmd)
+        except SystemExit as error:
+            warn(f"Could not refresh PR snapshot {pr.get('url') or pr.get('number')}: {error}")
+            continue
         if not isinstance(live, dict) or live.get("number") is None:
+            warn(f"Unexpected `gh pr view` payload for {pr.get('url') or pr.get('number')}: {live!r}")
             continue
         state = live.get("state")
         merged = bool(live.get("mergedAt")) or str(state or "").upper() == "MERGED"
