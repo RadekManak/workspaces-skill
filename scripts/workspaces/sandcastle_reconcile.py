@@ -7,6 +7,7 @@ directory with the runner's prompt/entrypoint templates (`init_sandcastle_runner
 """
 import json
 import shutil
+from collections import namedtuple
 from pathlib import Path
 
 from workspaces import issues as issue_model
@@ -14,13 +15,27 @@ from workspaces.common import SKILL_ROOT
 from workspaces.ledger import WorkspaceLedger
 
 
+ReconcileResult = namedtuple("ReconcileResult", "applied failures")
+
+
 def apply_sandcastle_result(config, workspace_id, result_path, *, skip_plan_invalidation=False):
+    """Apply a runner result file, returning a `ReconcileResult`.
+
+    `failures` holds one `(index, update, error)` per entry that could not be
+    applied. Partial failures do not raise -- sibling entries and sibling waves
+    must still be reconciled -- so callers are responsible for surfacing them.
+    """
     ledger = WorkspaceLedger(config)
     path = Path(result_path).expanduser()
     if not path.exists():
         raise SystemExit(f"Sandcastle result not found: {path}")
-    with path.open("r", encoding="utf-8") as f:
-        payload = json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"Invalid Sandcastle result JSON: {path}\n{error}") from error
+    if not isinstance(payload, dict):
+        raise SystemExit(f"Sandcastle result must be a JSON object: {path}")
     updates = payload.get("issues") or payload.get("updates") or []
     if not isinstance(updates, list):
         raise SystemExit("Sandcastle result field `issues` must be a list")
@@ -85,7 +100,7 @@ def apply_sandcastle_result(config, workspace_id, result_path, *, skip_plan_inva
             f"Sandcastle result `{path}` had {len(failures)} invalid entr"
             f"{'y' if len(failures) == 1 else 'ies'} and no valid updates were applied."
         )
-    return applied
+    return ReconcileResult(applied, failures)
 
 
 def init_sandcastle_runner(repo, force=False):

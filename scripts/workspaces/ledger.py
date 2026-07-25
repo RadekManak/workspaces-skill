@@ -12,6 +12,7 @@ from .common import (
     slug,
     template,
     validate_workspace_id,
+    warn,
     write_json,
     write_yaml,
 )
@@ -53,12 +54,18 @@ class WorkspaceLedger:
         lock_path = self.sandcastle_lock_path(workspace_id)
         if not lock_path.exists():
             return False
+        # A lock we cannot read tells us nothing about a running process, so it
+        # is reported as inactive (otherwise the workspace would be permanently
+        # deadlocked) -- but never silently, since it also means a genuinely
+        # running Sandcastle execution would no longer be detected.
         try:
             lock = read_json(lock_path)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as error:
+            warn(f"Ignoring unreadable Sandcastle lock {lock_path}: {error}")
             return False
         pid = lock.get("pid")
         if not isinstance(pid, int):
+            warn(f"Ignoring Sandcastle lock without a valid pid: {lock_path}")
             return False
         try:
             os.kill(pid, 0)
@@ -169,8 +176,10 @@ class WorkspaceLedger:
             return
         for meta in sorted(workspaces.glob("*/workspace.yaml")):
             data = read_yaml(meta)
-            if data.get("id"):
-                yield Workspace(data)
+            if not data.get("id"):
+                warn(f"Skipping workspace metadata without an `id`: {meta}")
+                continue
+            yield Workspace(data)
 
     def save(self, workspace):
         workspace_id = workspace.id

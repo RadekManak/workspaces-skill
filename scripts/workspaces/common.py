@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -40,6 +41,10 @@ STATE_ORDER = {
 }
 
 
+def warn(message):
+    print(f"Warning: {message}", file=sys.stderr)
+
+
 def now():
     return dt.datetime.now().astimezone().replace(microsecond=0).isoformat()
 
@@ -62,8 +67,15 @@ def write_yaml(path, data):
 
 
 def read_yaml(path):
-    with path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    path = Path(path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as error:
+        raise SystemExit(f"Invalid YAML in {path}:\n{error}") from error
+    if not isinstance(data, dict):
+        raise SystemExit(f"Expected a YAML mapping in {path}, got {type(data).__name__}")
+    return data
 
 
 def write_json(path, data):
@@ -72,7 +84,7 @@ def write_json(path, data):
 
 
 def read_json(path):
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def parse_json(text, default=None):
@@ -163,7 +175,11 @@ def run(cmd, cwd=None, check=True, capture=True):
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
-        raise SystemExit(f"Command failed: {' '.join(cmd)}\n{stderr}")
+        printable = " ".join(str(part) for part in cmd)
+        raise SystemExit(
+            f"Command failed (exit {proc.returncode}): {printable}"
+            + (f"\n{stderr}" if stderr else "")
+        )
     return (proc.stdout or "").strip()
 
 

@@ -25,15 +25,31 @@ def sandcastle_branch(workspace_id, issue_id):
     return f"sandcastle/{slug(workspace_id)}/{slug(issue_id)}"
 
 
-def split_frontmatter(text):
+def split_frontmatter(text, *, path=None):
+    """Split an issue file into its YAML frontmatter mapping and body.
+
+    Missing, unclosed, or non-mapping frontmatter raises `SystemExit`: an issue
+    without readable metadata has no status, id, or blockers, so returning an
+    empty mapping would silently present it as a fresh `planned` issue and let
+    dependency and cleanup decisions run on invented data.
+    """
+    location = f" in {path}" if path else ""
     if not text.startswith("---\n"):
-        return {}, text
+        raise SystemExit(f"Missing YAML frontmatter{location}")
     end = text.find("\n---\n", 4)
     if end == -1:
-        return {}, text
+        raise SystemExit(f"Unclosed YAML frontmatter{location}")
     raw_meta = text[4:end]
     body = text[end + len("\n---\n") :]
-    return yaml.safe_load(raw_meta) or {}, body
+    try:
+        meta = yaml.safe_load(raw_meta) or {}
+    except yaml.YAMLError as error:
+        raise SystemExit(f"Invalid YAML frontmatter{location}:\n{error}") from error
+    if not isinstance(meta, dict):
+        raise SystemExit(
+            f"Expected a YAML mapping in frontmatter{location}, got {type(meta).__name__}"
+        )
+    return meta, body
 
 
 def issue_body_from_args(args):
@@ -200,7 +216,7 @@ def write_issue(ledger, workspace_id, issue_id, meta, body, *, sandcastle=False,
 
 
 def read_issue(path):
-    meta, body = split_frontmatter(path.read_text(encoding="utf-8"))
+    meta, body = split_frontmatter(path.read_text(encoding="utf-8"), path=path)
     issue_id = meta.get("id") or path.stem
     return {"path": path, "meta": meta, "body": body, "id": str(issue_id)}
 
