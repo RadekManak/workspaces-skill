@@ -2,7 +2,11 @@
 
 Local workspace tracking for AI-assisted development.
 
-This repo contains the Codex skill, templates, and helper scripts. Runtime workspace data lives outside this repo under `~/workspaces`.
+**Status: early alpha.** The API, CLI, ledger layout, and skill instructions may change without notice. Expect rough edges.
+
+**`workspaces-with-sandcastle` is untested** in real workflows. Treat Sandcastle / AFK / runner automation as experimental; prefer the base `/workspaces` skill for normal use.
+
+This repo contains the Codex skill, templates, and helper scripts. Runtime workspace data lives outside this repo under `~/workspaces`. Licensed under the [Apache License 2.0](LICENSE).
 
 ## Layout
 
