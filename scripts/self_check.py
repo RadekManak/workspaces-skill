@@ -13,6 +13,7 @@ from tests.test_cleanup import CLEANUP_TESTS
 from tests.test_base_cli import BASE_TESTS
 from tests.test_sandcastle_cli import SANDCASTLE_TESTS
 from tests.test_cli_split import CLI_SPLIT_TESTS
+from tests.test_codex_handoff import CODEX_HANDOFF_TESTS
 
 
 def main():
@@ -24,6 +25,7 @@ def main():
     passed += run_dual_entrypoint(BASE_TESTS)
     passed += run_sandcastle_only(SANDCASTLE_TESTS)
     passed += run_cli_split(CLI_SPLIT_TESTS)
+    passed += run_cli_split(CODEX_HANDOFF_TESTS)
     print(f"{passed} self-check(s) passed")
 
 

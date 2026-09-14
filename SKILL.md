@@ -76,6 +76,10 @@ Use `adopt` for existing Cursor/manual worktrees. Mixed branch names are allowed
 
 Creation and adoption generate a VS Code workspace containing the ledger and all recorded repos. Treat it as generated output; update the ledger through helpers instead of editing it.
 
+After successful `create` or `adopt`, if the user explicitly requests a new Codex task or continuation, follow [Codex handoff](references/codex-handoff.md). That procedure keeps host tool calls separate from the workspace CLI and uses `scripts/codex_handoff.py` for the opt-in adapter. Ordinary creation, adoption, other topology operations, and retries never launch a task or composer. Report handoff results separately from the unchanged workspace JSON; integration failure does not invalidate the workspace operation.
+
+Codex handoff uses one primary repository by default and supplies the full workspace topology in the prompt. Separate launch authorization from implementation work. Missing secondary desktop roots do not block handoff unless the user explicitly requires full attachment; follow the handoff reference for strict mode and access-failure recovery.
+
 ### Switch session roots
 
 Topology-changing commands (`create`, `adopt`, `repo add`, `repo adopt`, `repo remove`, `doctor --fix`) print the current `.code-workspace` JSON as the final stdout block. To switch the agent session:

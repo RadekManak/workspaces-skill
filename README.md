@@ -189,6 +189,26 @@ Run self-checks:
 scripts/self_check.py
 ```
 
+## Optional Codex handoff
+
+An explicit follow-up request after `create` or `adopt` can use the separate
+`scripts/codex_handoff.py` adapter. The workspace CLI does not launch Codex.
+The agent host calls exposed desktop tools; the helper handles prompt preparation,
+Linux desktop bootstrap, experimental app-server submission, and a user-submitted
+composer fallback. See [Codex handoff](references/codex-handoff.md) for the host
+observation boundary and commands.
+
+A workspace can contain multiple repositories. Handoff uses the first recorded
+repository as the primary Codex root and supplies all repository and ledger paths
+in the prompt. `--handoff` authorizes launch; optional `--task` supplies work.
+`--require-all-roots` makes complete ordered attachment mandatory instead of optional.
+Launch success and observed desktop placement are reported separately.
+Interrupted submissions are never retried automatically. `make self-check` includes
+an offline two-repository handoff smoke test. The multi-repository primary-root
+handoff passed a live Codex desktop smoke test on 2026-09-14. The task launched
+with one attached primary root and read both repositories plus the ledger;
+desktop project association was not independently observable.
+
 ## Principles
 
 - The ledger is canonical.
